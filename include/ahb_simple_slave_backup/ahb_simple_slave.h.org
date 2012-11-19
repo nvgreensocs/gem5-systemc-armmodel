@@ -1,0 +1,261 @@
+// LICENSETEXT
+//
+//   Developed by :
+//    Ashwani Singh <ashwani@circuitsutra.com>
+//
+//
+// The contents of this file are subject to the licensing terms specified
+// in the file LICENSE. Please consult this file for restrictions and
+// limitations that may apply.
+// 
+// ENDLICENSETEXT
+
+#ifndef AHB_SIMPLE_SLAVE_H_
+#define AHB_SIMPLE_SLAVE_H_
+
+#include <sstream>
+#include "tlm_utils/multi_passthrough_target_socket.h"
+#include "tlm_utils/multi_passthrough_initiator_socket.h"
+#include "amba.h"
+#include "nerios_memstore.h"
+
+using namespace tlm_utils;
+
+
+#define DUMP(name_str, message) 
+//#define DUMP(name_str, message) \
+  //  printf("%s::%s \n", name_str, message);
+
+template<unsigned int BUSWIDTH>
+class AHB_simple_slave:public sc_core::sc_module
+{
+public:
+	amba::amba_slave_socket<> slave_socket;
+        // for loaders and so on
+	tlm_utils::multi_passthrough_target_socket<AHB_simple_slave <BUSWIDTH> >  slave_debug_socket;
+        Nerios_store_t* memory;
+	//sc_core::sc_in_clk clk;
+	SC_HAS_PROCESS(AHB_simple_slave);
+        AHB_simple_slave(sc_core::sc_module_name nm, std::string debug_port_name, std::string slave_port_name);
+	~AHB_simple_slave();
+	inline unsigned int get_size()
+	{
+		return size;
+	}
+	inline unsigned int get_base_addr()
+	{
+		return baseAddr;
+	}
+private:
+	//unsigned char * MEM;
+        amba::amba_burst_size  default_burstsize;
+	unsigned int txn_address;
+	unsigned int txn_burst_len;
+	unsigned int counter;
+	tlm::tlm_generic_payload *current_trans;
+	unsigned int baseAddr; //base address of the slave
+	unsigned int size; //size of the memory
+	bool m_request_pending;
+	bool m_data_pending;
+	void end_of_elaboration();
+	void responseProcess();
+	void masterTimingListener(gs::socket::timing_info);
+	tlm::tlm_sync_enum nb_fw_transport(tlm::tlm_generic_payload & trans, tlm::tlm_phase &ph, sc_core::sc_time &delay);
+        unsigned int transport_dbg(int id,tlm::tlm_generic_payload& trans);
+};
+
+
+template<unsigned int BUSWIDTH>
+AHB_simple_slave<BUSWIDTH>::AHB_simple_slave(sc_core::sc_module_name nm, std::string debug_port_name, std::string slave_port_name):sc_core::sc_module(nm),
+slave_socket(slave_port_name.c_str(),amba::amba_AXI,amba::amba_CT,false),
+slave_debug_socket(debug_port_name.c_str()),
+txn_address(0),
+txn_burst_len(0),
+counter(0),
+current_trans(NULL),
+m_request_pending(false),
+m_data_pending(false)
+{
+	    
+	    assert(size%4==0 && "invalid size given in bytes, give as a multiple of 4");
+	    /*MEM= new unsigned char[size];
+	    memset(MEM,0x00, (size/4));
+		memset((MEM+size/4), 0xff, (size/4));
+		memset((MEM+size/2),0x0c, (size/4));
+		memset((MEM+(3*size/4)),0x08, (size/4));*/
+		slave_socket.template register_nb_transport_fw< AHB_simple_slave<BUSWIDTH> >(this, & AHB_simple_slave<BUSWIDTH>::nb_fw_transport);
+                // register the dbg interface
+                slave_debug_socket.register_transport_dbg(this, & AHB_simple_slave<BUSWIDTH>::transport_dbg);
+		
+		//SC_METHOD(responseProcess);
+		SC_THREAD(responseProcess);
+                memory = new Nerios_store_t;
+                default_burstsize.value=(BUSWIDTH+7)/8;
+		//sensitive<<clk.pos();
+		//dont_initialize();
+		
+}
+
+template<unsigned int BUSWIDTH>
+AHB_simple_slave<BUSWIDTH>::~AHB_simple_slave()
+{
+	//delete[] MEM;
+}
+
+template<unsigned int BUSWIDTH>
+void AHB_simple_slave<BUSWIDTH>::end_of_elaboration()
+{
+	slave_socket.set_timing_listener_callback(this, & AHB_simple_slave::masterTimingListener);
+	slave_socket.activate_synchronization_protection();
+}
+
+template<unsigned int BUSWIDTH>
+void AHB_simple_slave<BUSWIDTH>::responseProcess()
+{
+	std::ostringstream msg;
+	msg.str("");
+        while(1){
+            wait(5, SC_NS);
+	if(current_trans!=NULL)
+	{
+		tlm::tlm_command cmd = current_trans->get_command();
+		amba::amba_burst_size * size;
+		current_trans->template get_extension<amba::amba_burst_size>(size);
+		sc_core::sc_time delay= sc_core::SC_ZERO_TIME;
+		if(cmd==tlm::TLM_WRITE_COMMAND)
+		{
+			if(txn_burst_len!=counter && m_data_pending)
+			{
+				
+				unsigned char * data = current_trans->get_data_ptr();
+				DUMP(name(),"Write transaction recieved");
+				msg.str("");
+                                unsigned int address_offset  = 4 * counter;
+				for(unsigned int i=0; i< size->value; i++)
+				{
+
+					//MEM[txn_address+i]=*(data+(4*counter)+i);
+                                        memory->write(txn_address, 1, (unsigned char*)(data+(4*counter)+i));
+					msg<< "data["<< i<<"] =" << (unsigned int)(*(data+(4*counter)+i)) <<endl;
+					DUMP(name(),msg.str());
+					msg.str("");
+				}
+				tlm::tlm_phase ph = amba::END_DATA;
+				
+				DUMP(name(),"Sending nb_bw, ph=END_DATA");
+				tlm::tlm_sync_enum retval= slave_socket->nb_transport_bw(*current_trans, ph,delay);
+				//assert((retval==tlm::TLM_ACCEPTED) && (ph == amba::END_DATA) && "invalid phase returned");
+				
+							
+				m_data_pending=false;
+				counter++;
+			}
+		}
+		else
+		{
+			DUMP(name(),"Read transaction received");
+			if(txn_burst_len!=counter && m_data_pending==true)
+			{
+				unsigned char *data= current_trans->get_data_ptr();
+				tlm::tlm_phase ph = amba::BEGIN_LAST_RESP;
+				msg.str("");
+				for(unsigned int j=0; j<size->value; j++)
+				{
+                                        memory->read(txn_address, 1, (unsigned char*)(data+(4*counter)+j));
+					//*(data+(4*counter)+j)= MEM[txn_address+j];
+					
+				}
+				current_trans->set_data_ptr(data);
+				DUMP(name(),"Sending nb_bw, BEGIN_RESP");
+				tlm::tlm_sync_enum retval=slave_socket->nb_transport_bw(*current_trans,ph,delay);
+				//assert((retval==tlm::TLM_ACCEPTED) && (ph== tlm::BEGIN_RESP));
+				m_data_pending=false;
+				counter++;
+			}
+		}
+		if(txn_burst_len==counter)
+		{
+			current_trans= NULL;
+			counter=0;
+		}
+		else
+		{
+			txn_address+= size->value;
+		}
+		
+	}
+        }
+}
+
+
+template<unsigned int BUSWIDTH>
+void AHB_simple_slave<BUSWIDTH>::masterTimingListener(gs::socket::timing_info)
+{
+	DUMP(name(),"Reached the master timing listener");
+}
+
+template<unsigned int BUSWIDTH>
+tlm::tlm_sync_enum AHB_simple_slave<BUSWIDTH>::nb_fw_transport(tlm::tlm_generic_payload & trans, tlm::tlm_phase & ph, sc_core::sc_time & delay)
+{
+	amba::amba_trans_type * type;
+	amba::amba_burst_size* size;
+	if(ph==tlm::BEGIN_REQ)
+	{
+		DUMP(name(),"nb_fw, ph:BEGIN_REQ");
+		current_trans=&trans;
+		//current_trans->template get_extension<amba::amba_trans_type>(type);
+		//current_trans->template get_extension<amba::amba_burst_size>(size);
+                if (!slave_socket.template get_extension<amba::amba_burst_size>(size, trans))
+                    size=&default_burstsize;
+
+                
+		
+		//if(type->value == amba::NON_SEQUENTIAL)
+		{//save this address and the burst-length
+			txn_address=current_trans->get_address();
+			txn_burst_len= current_trans->get_data_length()/(size->value);
+			counter=0;
+		}
+		if(current_trans->get_command()==tlm::TLM_READ_COMMAND)
+			m_data_pending=true; //we have to send the data to the master
+		ph=tlm::END_REQ;
+		return tlm::TLM_UPDATED;
+	}
+	else if(ph== amba::BEGIN_DATA)
+	{
+		DUMP(name(),"nb_fw, ph:BEGIN_DATA");
+		m_data_pending=true; //we have to copy the data in the memory.
+		return tlm::TLM_ACCEPTED;
+	}
+	else if(ph== amba::RESET_ASSERT){
+		//not considering it
+	}
+	else if(ph==amba::RESET_DEASSERT)
+	{
+		//not considering it
+	}
+	return tlm::TLM_ACCEPTED;
+	
+}
+
+template<unsigned int BUSWIDTH>
+unsigned int AHB_simple_slave<BUSWIDTH>::transport_dbg(int id,tlm::tlm_generic_payload& trans)
+{
+	  tlm::tlm_command cmd = trans.get_command();
+	  sc_dt::uint64   addr = trans.get_address();
+	  unsigned char*  data = trans.get_data_ptr();
+	  unsigned int     len = trans.get_data_length();
+	  bool            done = false;
+
+	  if ( cmd == tlm::TLM_READ_COMMAND )
+          {
+              memory->read(addr,len, data);
+          }
+	  else if ( cmd == tlm::TLM_WRITE_COMMAND )
+          {
+              memory->write(addr,len,data);
+          }
+	  return len;
+}
+
+#endif /*AHB_simple_slave_H_*/

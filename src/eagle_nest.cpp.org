@@ -1,0 +1,1160 @@
+/*********************************************************************
+ *  Copyright 2012 by Texas Instruments Incorporated.
+ *  All rights reserved. Property of Texas Instruments Incorporated.
+ *  Restricted rights to use, duplicate or disclose this code are
+ *  granted through contract.
+ ********************************************************************/
+
+/*CS******************************************************************
+
+Project :	CIV TLM
+
+Author	:   Alexandre Romaña
+
+Date	:	Q4 2011
+
+File	:	eagle_nest.cpp
+
+Purpose	:	Implementation unit 
+
+Description:
+
+Bridge that converts the classic sendTiming/recvTiming handshake to AMBA TLM2 CT
+
+******************************************************************CE*/
+
+
+/*************** standard files inclusion ***************/
+
+/*************** pre-processor options definition ***********/
+
+/*************** application files inclusion ***************/
+
+#include "eagle_nest.hpp"
+
+/*************** macros definition ***************/
+
+/*************** types definition ***************/
+
+/*************** constants definition ***************/
+
+/*************** pre-processor autocheck ***************/
+
+/*************** global variables and arrays definition ***************/
+
+/*************** local variables and arrays definition ***************/
+
+/*************** local routines definition ***************/
+
+/*************** funtions definition  ***************/
+
+//#define DEBUG_REORDERING
+#ifdef DEBUG_REORDERING
+#define DBG_REORDERING_MSG( msg ) cout << "EN reordering : " << sc_time_stamp()	  \
+        << "(" << sc_get_curr_simcontext()->delta_count() \
+        << "): " << msg << endl;
+#else
+#define DBG_REORDERING_MSG( msg )
+#endif
+
+//#define DEBUG_EN_PIPELINE
+#ifdef DEBUG_EN_PIPELINE
+#define DBG_PIPE_MSG( msg ) cout << "EN : " << sc_time_stamp()	  \
+        << "(" << sc_get_curr_simcontext()->delta_count() \
+        << "): " << msg << endl;
+#else
+#define DBG_PIPE_MSG( msg )
+#endif
+
+template<unsigned int BUSWIDTH>
+EagleNest<BUSWIDTH>::~EagleNest(){}
+
+template<unsigned int BUSWIDTH>
+EagleNest<BUSWIDTH>::EagleNest(sc_core::sc_module_name nm, std::string slave_port_name,std::string master_port_name):
+sc_module(nm),
+slave_sock(slave_port_name.c_str(),amba::amba_AXI,amba::amba_CT,false),
+bus_if(master_port_name.c_str()),
+wr_elastic_buffer(1),rd_elastic_buffer(1),
+_cluster_id_cfg("cluster_id",0),
+_linux_remap_cfg("linux_remap",false),
+_vbusm_priority_cfg("vbusm_priority",7),
+rdcmd_pipe_in("rdcmd_pipe_in"),
+wrcmd_pipe_in("wrcmd_pipe_in"),
+wdata_pipe_in("wdata_pipe_in"),
+rdata_pipe_in("rdata_pipe_in"),
+ws_pipe_in("ws_pipe_in"),
+rdcmd_pipe_out("rdcmd_pipe_out"),
+wrcmd_pipe_out("wrcmd_pipe_out"),
+wdata_pipe_out("wdata_pipe_out"),
+rdata_pipe_out("rdata_pipe_out"),
+ws_pipe_out("ws_pipe_out")
+{
+	m_Api = gs::cnf::GCnf_Api::getApiInstance(this);
+	
+	slave_sock.template register_nb_transport_fw< EagleNest<BUSWIDTH> >(this, & EagleNest<BUSWIDTH>::nb_fw_transport);
+	SC_THREAD(readResponseThread);
+	SC_THREAD(writeResponseThread);
+	SC_THREAD(master_ws_thread);
+	SC_THREAD(master_wr_thread);
+	SC_THREAD(master_cmd_thread);
+	SC_THREAD(master_rd_thread);
+	SC_THREAD(read_command_splitting_thread);
+	SC_THREAD(write_command_splitting_thread);
+	SC_THREAD(main_arm_clk_pipeline_drive);
+	SC_THREAD(main_msmc_clk_pipeline_drive);
+
+    default_burstsize.value=(BUSWIDTH+7)/8;
+    pending_rd_request=NULL;
+    pending_wr_request=NULL;
+    pending_wr_data_request=NULL;
+    _wdata_counter=0;
+    _wdata_available=0;
+    _wstatus_if_blocked=false;
+    _read_if_blocked=false;
+    _timestamp=0;
+}
+
+template<unsigned int BUSWIDTH>
+void EagleNest<BUSWIDTH>::masterTimingListener(gs::socket::timing_info)
+{
+//	std::cout << name() << "Reached the master timing listener" << std::endl;
+}
+
+template<unsigned int BUSWIDTH>
+void EagleNest<BUSWIDTH>::writeResponseThread()
+{
+	tlm::tlm_generic_payload* _trans;
+	vbusm_wrstatus_pkt ws_pkt;
+	amba::amba_exclusive * m_exclusive;
+	sc_core::sc_time delay=sc_core::SC_ZERO_TIME;
+	tlm::tlm_phase ph;
+	while(true)
+	{
+		ws_pkt=boost::any_cast<vbusm_wrstatus_pkt>(*(ws_pipe_out.get()).get());
+		for (uint32_t i=0;i < wstatus_reordering_queue.size();i++)
+		{
+			if ((wstatus_reordering_queue[i]._cmd.id.id() == ws_pkt.id.id()) && (wstatus_reordering_queue[i]._cmd.id.mstid() == ws_pkt.id.mstid()) && ws_pkt.sdone)
+			{
+				if (ws_pkt.sstatus == CBA::WSTATUS_EXCL_ERROR)
+				{
+					assert(wr_transactions_pool[wstatus_reordering_queue[i]._cmd.id.mstid()&0x7][wstatus_reordering_queue[i]._cmd.id.id()] != NULL);
+					_trans=wr_transactions_pool[wstatus_reordering_queue[i]._cmd.id.mstid()&0x7][wstatus_reordering_queue[i]._cmd.id.id()];
+					slave_sock.template get_extension<amba::amba_exclusive>(m_exclusive,*_trans);
+					m_exclusive->value=true;
+					slave_sock.template validate_extension<amba::amba_exclusive>(*_trans);
+				}
+				wstatus_reordering_queue[i]._return_valid=true;
+				break;
+			}
+		}
+		while(!wstatus_reordering_queue.empty() && wstatus_reordering_queue.front()._return_valid)
+		{
+			assert(wr_transactions_pool[wstatus_reordering_queue.front()._cmd.id.mstid()&0x7][wstatus_reordering_queue.front()._cmd.id.id()] != NULL);
+			_trans=wr_transactions_pool[wstatus_reordering_queue.front()._cmd.id.mstid()&0x7][wstatus_reordering_queue.front()._cmd.id.id()];
+			ph = tlm::BEGIN_RESP;
+			switch(slave_sock->nb_transport_bw(*_trans,ph,delay))
+			{
+				case tlm::TLM_ACCEPTED:
+					_wstatus_if_blocked=true;
+					wait(_wstatus_if_ready);
+					_wstatus_if_blocked=false;
+					break;
+				case tlm::TLM_UPDATED:
+					assert(ph == tlm::END_RESP);
+					break;
+				case tlm::TLM_COMPLETED:
+					abort();
+			}
+			wait(eagle_clk_period);
+			wstatus_reordering_queue.pop_front();
+		}
+	}
+}
+
+template<unsigned int BUSWIDTH>
+void EagleNest<BUSWIDTH>::readResponseThread()
+{
+	sc_core::sc_time delay=sc_core::SC_ZERO_TIME;
+	std::ostringstream msg;
+	msg.str("");
+	vbusm_rd_pkt rd_pkt;
+    uint32_t burstLen=0;
+    uint32_t count=0;    
+    tlm::tlm_generic_payload* _trans;
+    amba::amba_id * m_id;
+    amba::amba_exclusive * m_exclusive;
+    uint32_t width=(BUSWIDTH/8);
+    uint32_t wr_index=0;
+    uint32_t dp_size=0;
+    tlm::tlm_phase ph;
+	while(true)
+	{
+		rd_pkt=boost::any_cast<vbusm_rd_pkt>(*(rdata_pipe_out.get()).get());
+		for (uint32_t i=0;i < rdata_reordering_queue.size();i++)
+		{
+			if ((rdata_reordering_queue[i]._cmd.id.id() == rd_pkt.id.id()) && (rdata_reordering_queue[i]._cmd.id.mstid() == rd_pkt.id.mstid()))
+			{
+				DBG_REORDERING_MSG(" received a rd data packet with id =" << rd_pkt.id << " at reordering position " << i );
+				rdata_reordering_queue[i]._rdata.push(rd_pkt);
+				if (rd_pkt.rlast)
+					rdata_reordering_queue[i]._return_valid=true;
+				break;
+			}
+		}
+		while(!rdata_reordering_queue.empty() && rdata_reordering_queue.front()._return_valid)
+		{
+			DBG_REORDERING_MSG("Data ready to be returned on front of the queue with id=" << rdata_reordering_queue.front()._rdata.front().id );
+			rd_pkt = rdata_reordering_queue.front()._rdata.front();
+			assert(rd_transactions_pool[rd_pkt.id.mstid()&0x7][rd_pkt.id.id()] != NULL);
+			_trans=rd_transactions_pool[rd_pkt.id.mstid()&0x7][rd_pkt.id.id()];
+			burstLen = uint32_t(ceil(double_t(rd_pkt.rxcnt)/double_t(width)));
+			count=0;
+			while(count<burstLen)
+			{
+				dp_size=std::min(width,rd_pkt.rxcnt);
+				assert(width*count+rd_pkt.ralign < 32);
+				memcpy(&_trans->get_data_ptr()[wr_index],&rd_pkt.rdata[width*count+rd_pkt.ralign],dp_size);
+	//			for(unsigned j=0;j<width; j++)
+	//			{
+	//				_trans->get_data_ptr()[j+wr_index]=rd_pkt.rdata[j+width*count];
+	//				std::cout << "EAGLENEST: data[" << dec << j+wr_index << "]=0x" << hex << uint32_t(rd_pkt.rdata[j+width*count]) << std::endl;
+	//			}
+	//			std::cout << dec << std::endl;
+//				if (rd_pkt.rstatus == CBA::RSTATUS_SUCCESS)
+				_trans->set_response_status(tlm::TLM_OK_RESPONSE);
+				_trans->set_address(_rd_return_address[rd_pkt.id.id()]);
+				slave_sock.template get_extension<amba::amba_id>(m_id,*_trans);
+				m_id->value=rd_pkt.id.id() + ((rd_pkt.id.mstid()&0x7) << 4);
+				slave_sock.template validate_extension<amba::amba_id>(*_trans);
+				_trans->set_data_length(dp_size);
+				if(rd_pkt.rlast && (count+1 >= burstLen))
+				{
+				   ph= amba::BEGIN_LAST_RESP;
+				   wr_index=0;
+				   if (rd_pkt.rstatus == CBA::RSTATUS_EXCL_ERROR)
+				   {
+					    slave_sock.template get_extension<amba::amba_exclusive>(m_exclusive,*_trans);
+						m_exclusive->value=true;
+						slave_sock.template validate_extension<amba::amba_exclusive>(*_trans);
+				   }
+				}
+				else
+				{
+				   ph =tlm::BEGIN_RESP;
+				   wr_index += dp_size;
+				}
+				switch(slave_sock->nb_transport_bw(*_trans,ph,delay))
+				{
+					case tlm::TLM_ACCEPTED:
+						_read_if_blocked=true;
+						wait(_read_if_ready);
+						_read_if_blocked=false;
+						break;
+					case tlm::TLM_UPDATED:
+						assert(ph == tlm::END_RESP);
+						_rd_return_address[rd_pkt.id.id()] += width;
+						count++;
+						break;
+					case tlm::TLM_COMPLETED:
+						abort();
+				}
+				wait(eagle_clk_period);
+			}
+			rdata_reordering_queue.front()._rdata.pop();
+			if(rd_pkt.rlast)
+				rdata_reordering_queue.pop_front();
+		}
+	}
+
+}
+
+template<unsigned int BUSWIDTH>
+tlm::tlm_sync_enum EagleNest<BUSWIDTH>::nb_fw_transport(tlm::tlm_generic_payload & trans, tlm::tlm_phase & ph, sc_core::sc_time &delay)
+{
+	Cmd vbusm_cmd;
+	WrData wr_pkt;
+	uint32_t bus_width = BUSWIDTH / 8;
+	if(ph == amba::BEGIN_DATA || ph == amba::BEGIN_LAST_DATA)
+	{
+			assert(trans.get_command()==tlm::TLM_WRITE_COMMAND && "Inappropriate command with this phase.");
+//			std::cout << name() << "Write Transaction:    data received" << std::endl;
+			//unsigned int address= trans.get_address();//+(counter*(burstsize->value));
+			unsigned char * data=trans.get_data_ptr();
+			if (wdata_buf->num_free() > 0)
+			{
+				wr_pkt._pkt.wfirst=(_wdata_counter == 0);
+				wr_pkt._pkt.wxcnt=trans.get_data_length();
+				wr_pkt._pkt.walign=(wr_pkt._pkt.wfirst)?trans.get_address()% bus_width:0;
+				wr_pkt.walign_2x=(wr_pkt._pkt.wfirst)?trans.get_address() % (2*bus_width):0;
+				wr_pkt._pkt.wbyten=uint32_t((uint64_t(1) << wr_pkt._pkt.wxcnt) -1) << wr_pkt._pkt.walign;
+				memcpy(&wr_pkt._pkt.wdata[wr_pkt._pkt.walign],&data[_wdata_counter],wr_pkt._pkt.wxcnt);
+				if (ph == amba::BEGIN_LAST_DATA)
+				{
+					_wdata_counter=0;
+					wr_pkt._pkt.wlast=true;
+				}
+				else
+				{
+					wr_pkt._pkt.wlast=false;
+					_wdata_counter += wr_pkt._pkt.wxcnt;
+				}
+				wdata_buf->write(wr_pkt);
+				ph = amba::END_DATA;
+				return tlm::TLM_UPDATED;
+			}
+			else
+			{
+				pending_wr_data_request=&trans;	
+				return tlm::TLM_ACCEPTED;
+			}
+	}
+	else if(ph == tlm::BEGIN_REQ)
+	{
+		if (trans.get_command()==tlm::TLM_WRITE_COMMAND)
+		{
+			if (wr_elastic_buffer.num_free() > 0)
+			{
+				vbusm_cmd._cmd = compute_vbusm_write(&trans);
+				vbusm_cmd._ts = _timestamp++;
+				vbusm_cmd._return_valid = false;
+				wr_elastic_buffer.write(vbusm_cmd);
+				wr_transactions_pool[vbusm_cmd._cmd.id.mstid()&0x7][vbusm_cmd._cmd.id.id()]=&trans;
+				ph = tlm::END_REQ;
+				if (!slave_sock.template get_extension<amba::amba_burst_size>(burstsize, trans))
+				  burstsize=&default_burstsize;
+				return tlm::TLM_UPDATED;
+			}
+			else
+			{
+				pending_wr_request = &trans;
+				return tlm::TLM_ACCEPTED;
+			}
+		}
+		else
+		{
+			if (rd_elastic_buffer.num_free() > 0)
+			{
+				vbusm_cmd._cmd = compute_vbusm_read(&trans);
+				vbusm_cmd._ts = _timestamp++;
+				vbusm_cmd._return_valid = false;
+				rd_elastic_buffer.write(vbusm_cmd);
+				rd_transactions_pool[vbusm_cmd._cmd.id.mstid()&0x7][vbusm_cmd._cmd.id.id()]=&trans;
+				ph = tlm::END_REQ;
+				return tlm::TLM_UPDATED;
+			}
+			else
+			{
+				pending_rd_request = &trans;
+				return tlm::TLM_ACCEPTED;
+			}
+		}
+	}
+	else if(ph== tlm::END_RESP)
+	{
+		if ((trans.get_command()==tlm::TLM_WRITE_COMMAND) && _wstatus_if_blocked)
+			_wstatus_if_ready.notify();
+		else if ((trans.get_command()==tlm::TLM_READ_COMMAND) && _read_if_blocked)
+			_read_if_ready.notify();
+	}
+	else if(ph == amba::CSYSREQ_ASSERT ||
+		ph == amba::CSYSREQ_DEASSERT )
+		{
+			std::cout << name() << "We are ignoring the low-power interface." << std::endl;
+		}
+	else if(ph == amba::RESET_ASSERT ||
+		ph ==amba::RESET_DEASSERT )
+		{
+			std::cout << name() << "We are ignoring the reset signal right now." << std::endl;
+		}
+	else
+			assert("Unexpected phase received from the master");
+	return tlm::TLM_ACCEPTED;
+}
+
+template<unsigned int BUSWIDTH>
+void EagleNest<BUSWIDTH>::before_end_of_elaboration()
+{
+	vbusm_clk_period = bus_if->get_bus_clk_period();
+	_vbusm_clk.init(vbusm_clk_period);
+	eagle_clk_period = m_Api->getValue<sc_core::sc_time>("clk1");
+	_eagle_clk.init(eagle_clk_period);
+
+	// forward = 1 arm_clk + sync + 3 msmc_clk
+	// |Req|.|.|.|.|Bus
+	// backwards = 3 msmc_clk + sync + 2 arm_clk
+
+	  Pipeline_stage*  wrcmd_fifo_e1 = new Pipeline_stage("WRCMD_E1",1,boost::bind( &EagleNest<BUSWIDTH>::wrcmd_push_sync, this, _1, _2, _3, _4, _5));
+	  main_arm_clk_pipeline.push_back(&wrcmd_fifo_e1->latch_evt);
+	  Pipeline_stage*  rdcmd_fifo_e1 = new Pipeline_stage("RDCMD_E1",1,boost::bind( &EagleNest<BUSWIDTH>::rdcmd_push_sync, this, _1, _2, _3, _4, _5));
+	  main_arm_clk_pipeline.push_back(&rdcmd_fifo_e1->latch_evt);
+	  Pipeline_stage*  wdata_fifo_e1 = new Pipeline_stage("WDATA_E1",1,boost::bind( &EagleNest<BUSWIDTH>::wdata_push_sync, this, _1, _2, _3, _4, _5));
+	  main_arm_clk_pipeline.push_back(&wdata_fifo_e1->latch_evt);
+
+	  Pipeline_stage*  wrcmd_fifo_e2 = new Pipeline_stage("WRCMD_E2",1,boost::bind( &EagleNest<BUSWIDTH>::wrcmd_pop_sync, this, _1, _2, _3, _4, _5));
+	  main_msmc_clk_pipeline.push_back(&wrcmd_fifo_e2->latch_evt);
+	  Pipeline_stage*  rdcmd_fifo_e2 = new Pipeline_stage("RDCMD_E2",1,boost::bind( &EagleNest<BUSWIDTH>::rdcmd_pop_sync, this, _1, _2, _3, _4, _5));
+	  main_msmc_clk_pipeline.push_back(&rdcmd_fifo_e2->latch_evt);
+	  Pipeline_stage*  wdata_fifo_e2 = new Pipeline_stage("WDATA_E2",1,boost::bind( &EagleNest<BUSWIDTH>::wdata_pop_sync, this, _1, _2, _3, _4, _5));
+	  main_msmc_clk_pipeline.push_back(&wdata_fifo_e2->latch_evt);
+
+	  Pipeline_stage*  wrcmd_fifo_e3 = new Pipeline_stage("WRCMD_E3",1,boost::bind( &EagleNest<BUSWIDTH>::Empty_stage_func, this, _1, _2, _3, _4, _5));
+	  main_msmc_clk_pipeline.push_back(&wrcmd_fifo_e3->latch_evt);
+	  Pipeline_stage*  rdcmd_fifo_e3 = new Pipeline_stage("RDCMD_E3",1,boost::bind( &EagleNest<BUSWIDTH>::Empty_stage_func, this, _1, _2, _3, _4, _5));
+	  main_msmc_clk_pipeline.push_back(&rdcmd_fifo_e3->latch_evt);
+	  Pipeline_stage*  wdata_fifo_e3 = new Pipeline_stage("WDATA_E3",1,boost::bind( &EagleNest<BUSWIDTH>::wdata_e3_stage, this, _1, _2, _3, _4, _5));
+	  main_msmc_clk_pipeline.push_back(&wdata_fifo_e3->latch_evt);
+
+	  Pipeline_stage*  wrcmd_fifo_e4 = new Pipeline_stage("WRCMD_E4",1,boost::bind( &EagleNest<BUSWIDTH>::Empty_stage_func, this, _1, _2, _3, _4, _5));
+	  main_msmc_clk_pipeline.push_back(&wrcmd_fifo_e4->latch_evt);
+	  Pipeline_stage*  rdcmd_fifo_e4 = new Pipeline_stage("RDCMD_E4",1,boost::bind( &EagleNest<BUSWIDTH>::Empty_stage_func, this, _1, _2, _3, _4, _5));
+	  main_msmc_clk_pipeline.push_back(&rdcmd_fifo_e4->latch_evt);
+	  Pipeline_stage*  wdata_fifo_e4 = new Pipeline_stage("WDATA_E4",1,boost::bind( &EagleNest<BUSWIDTH>::Empty_stage_func, this, _1, _2, _3, _4, _5));
+	  main_msmc_clk_pipeline.push_back(&wdata_fifo_e4->latch_evt);
+
+
+	  // Return pipe
+
+	  Pipeline_stage*  ws_e1 = new Pipeline_stage("WS_E1",1,boost::bind( &EagleNest<BUSWIDTH>::Empty_stage_func, this, _1, _2, _3, _4, _5));
+	  main_msmc_clk_pipeline.push_back(&ws_e1->latch_evt);
+	  Pipeline_stage*  rd_e1 = new Pipeline_stage("RD_E1",1,boost::bind( &EagleNest<BUSWIDTH>::Empty_stage_func, this, _1, _2, _3, _4, _5));
+	  main_msmc_clk_pipeline.push_back(&rd_e1->latch_evt);
+
+	  Pipeline_stage*  ws_e2 = new Pipeline_stage("WS_E2",1,boost::bind( &EagleNest<BUSWIDTH>::ws_push_sync, this, _1, _2, _3, _4, _5));
+	  main_msmc_clk_pipeline.push_back(&ws_e2->latch_evt);
+	  Pipeline_stage*  rd_e2 = new Pipeline_stage("RD_E2",1,boost::bind( &EagleNest<BUSWIDTH>::rdata_push_sync, this, _1, _2, _3, _4, _5));
+	  main_msmc_clk_pipeline.push_back(&rd_e2->latch_evt);
+
+	  Pipeline_stage*  ws_e3 = new Pipeline_stage("WS_E3",1,boost::bind( &EagleNest<BUSWIDTH>::ws_pop_sync, this, _1, _2, _3, _4, _5));
+	  main_arm_clk_pipeline.push_back(&ws_e3->latch_evt);
+	  Pipeline_stage*  rd_e3 = new Pipeline_stage("RD_E3",1,boost::bind( &EagleNest<BUSWIDTH>::rdata_pop_sync, this, _1, _2, _3, _4, _5));
+	  main_arm_clk_pipeline.push_back(&rd_e3->latch_evt);
+
+	  Pipeline_stage*  ws_e4 = new Pipeline_stage("WS_E4",1,boost::bind( &EagleNest<BUSWIDTH>::Empty_stage_func, this, _1, _2, _3, _4, _5));
+	  main_arm_clk_pipeline.push_back(&ws_e4->latch_evt);
+	  Pipeline_stage*  rd_e4 = new Pipeline_stage("RD_E4",1,boost::bind( &EagleNest<BUSWIDTH>::Empty_stage_func, this, _1, _2, _3, _4, _5));
+	  main_arm_clk_pipeline.push_back(&rd_e4->latch_evt);
+
+	  // Connections
+
+	  // WR_CMD
+	  wrcmd_fifo_e1->in.bind(wrcmd_pipe_in);
+	  bus_channel<boost::shared_ptr<boost::any> >* wrcmd_e2_to_e3 = new bus_channel<boost::shared_ptr<boost::any> >("WRCMD_E2_to_E3");
+	  wrcmd_fifo_e2->out.bind(*wrcmd_e2_to_e3);
+	  wrcmd_fifo_e3->in.bind(*wrcmd_e2_to_e3);
+	  bus_channel<boost::shared_ptr<boost::any> >* wrcmd_e3_to_e4 = new bus_channel<boost::shared_ptr<boost::any> >("WRCMD_E3_to_E4");
+	  wrcmd_fifo_e3->out.bind(*wrcmd_e3_to_e4);
+	  wrcmd_fifo_e4->in.bind(*wrcmd_e3_to_e4);
+	  wrcmd_fifo_e4->out.bind(wrcmd_pipe_out);
+
+	  // RD_CMD
+	  rdcmd_fifo_e1->in.bind(rdcmd_pipe_in);
+	  bus_channel<boost::shared_ptr<boost::any> >* rdcmd_e2_to_e3 = new bus_channel<boost::shared_ptr<boost::any> >("RDCMD_E2_to_E3");
+	  rdcmd_fifo_e2->out.bind(*rdcmd_e2_to_e3);
+	  rdcmd_fifo_e3->in.bind(*rdcmd_e2_to_e3);
+	  bus_channel<boost::shared_ptr<boost::any> >* rdcmd_e3_to_e4 = new bus_channel<boost::shared_ptr<boost::any> >("RDCMD_E3_to_E4");
+	  rdcmd_fifo_e3->out.bind(*rdcmd_e3_to_e4);
+	  rdcmd_fifo_e4->in.bind(*rdcmd_e3_to_e4);
+	  rdcmd_fifo_e4->out.bind(rdcmd_pipe_out);
+
+	  // WDATA
+	  wdata_fifo_e1->in.bind(wdata_pipe_in);
+	  bus_channel<boost::shared_ptr<boost::any> >* wdata_e2_to_e3 = new bus_channel<boost::shared_ptr<boost::any> >("wdata_E2_to_E3");
+	  wdata_fifo_e2->out.bind(*wdata_e2_to_e3);
+	  wdata_fifo_e3->in.bind(*wdata_e2_to_e3);
+	  bus_channel<boost::shared_ptr<boost::any> >* wdata_e3_to_e4 = new bus_channel<boost::shared_ptr<boost::any> >("wdata_E3_to_E4");
+	  wdata_fifo_e3->out.bind(*wdata_e3_to_e4);
+	  wdata_fifo_e4->in.bind(*wdata_e3_to_e4);
+	  wdata_fifo_e4->out.bind(wdata_pipe_out);
+
+	  // RDATA
+	  rd_e1->in.bind(rdata_pipe_in);
+	  bus_channel<boost::shared_ptr<boost::any> >* rd_e1_to_e2 = new bus_channel<boost::shared_ptr<boost::any> >("rdata_E1_to_E2");
+	  rd_e1->out.bind(*rd_e1_to_e2);
+	  rd_e2->in.bind(*rd_e1_to_e2);
+	  bus_channel<boost::shared_ptr<boost::any> >* rd_e3_to_e4 = new bus_channel<boost::shared_ptr<boost::any> >("rdata_E3_to_E4");
+	  rd_e3->out.bind(*rd_e3_to_e4);
+	  rd_e4->in.bind(*rd_e3_to_e4);
+	  rd_e4->out.bind(rdata_pipe_out);
+
+	  // WSTATUS
+	  ws_e1->in.bind(ws_pipe_in);
+	  bus_channel<boost::shared_ptr<boost::any> >* ws_e1_to_e2 = new bus_channel<boost::shared_ptr<boost::any> >("ws_E1_to_E2");
+	  ws_e1->out.bind(*ws_e1_to_e2);
+	  ws_e2->in.bind(*ws_e1_to_e2);
+	  bus_channel<boost::shared_ptr<boost::any> >* ws_e3_to_e4 = new bus_channel<boost::shared_ptr<boost::any> >("ws_E3_to_E4");
+	  ws_e3->out.bind(*ws_e3_to_e4);
+	  ws_e4->in.bind(*ws_e3_to_e4);
+	  ws_e4->out.bind(ws_pipe_out);
+
+
+	slave_sock.set_timing_listener_callback(this, & EagleNest::masterTimingListener);
+	rdata_fifo = new synchronizer_fifo<vbusm_rd_pkt>("RdFifo",8,vbusm_clk_period,eagle_clk_period);
+	rd_cmd_buf = new synchronizer_fifo<Cmd>("RdCmdFifo",6,eagle_clk_period,vbusm_clk_period);
+	wr_cmd_buf = new synchronizer_fifo<Cmd>("WrCmdFifo",6,eagle_clk_period,vbusm_clk_period);
+	wrstat_fifo = new synchronizer_fifo<vbusm_wrstatus_pkt>("WsFifo",8,vbusm_clk_period,eagle_clk_period);
+	wdata_buf = new synchronizer_fifo<WrData>("WrFifo",5,eagle_clk_period,vbusm_clk_period);
+
+	gs::socket::timing_info info;
+	info.set_start_time(tlm::END_REQ,sc_core::sc_time(1,sc_core::SC_PS));
+	info.set_start_time(tlm::BEGIN_RESP,sc_core::sc_time(3,sc_core::SC_PS));
+	info.set_start_time(amba::END_DATA,sc_core::sc_time(2,sc_core::SC_PS));
+	slave_sock.set_target_timing(info);	
+//	slave_sock.activate_synchronization_protection();
+	
+	_cluster_id=_cluster_id_cfg;
+	_linux_remap=_linux_remap_cfg;
+}
+
+template<unsigned int BUSWIDTH>
+bool EagleNest<BUSWIDTH>::checkNoOlderRead(Cmd cmd_pkt)
+{
+	// check mstid, ts, address??
+	for (std::deque<Cmd>::iterator iter = rdcmd_in_flight.begin(); iter != rdcmd_in_flight.end(); ++iter)
+	{
+		if ((cmd_pkt._ts > iter->_ts) && (cmd_pkt._cmd.id.mstid() == iter->_cmd.id.mstid()))
+			return false;
+	}
+	return true;
+}
+
+template<unsigned int BUSWIDTH>
+bool EagleNest<BUSWIDTH>::checkNoOlderWrite(Cmd cmd_pkt)
+{
+	for (std::deque<Cmd>::iterator iter = wrcmd_in_flight.begin(); iter != wrcmd_in_flight.end(); ++iter)
+	{
+		if ((cmd_pkt._ts > iter->_ts) && (cmd_pkt._cmd.id.mstid() == iter->_cmd.id.mstid()))
+			return false;
+	}
+	return true;
+}
+
+/*
+ * The VBusM command
+ * interface drains both fifos with read transactions having priority over writes on a given cycle if there
+ * was no read or write transaction in the prior cycle. Reads are given priority since the Eagle CPU is
+ * more likely to stall out due to critical demand program and data fetches than read after write
+ * dependencies. Otherwise, priority is given to the write channel if the read channel had taken priority in
+ * the prior cycle and vice versa.
+*/
+
+template<unsigned int BUSWIDTH>
+void EagleNest<BUSWIDTH>::master_cmd_thread()
+{
+	enum cmd_thread_state_t { if_IDLE,if_READ,if_WRITE};
+	cmd_thread_state_t curr_state=if_IDLE;
+	vbusm_cmd_pkt cmd_pkt;
+	sc_core::sc_time delay=sc_core::SC_ZERO_TIME;
+	while(true)
+	{
+		wait(_eagle_clk.next_posedge_delta());
+		if ((pending_rd_request != NULL) && (rd_elastic_buffer.num_free() > 0))
+		{
+			tlm::tlm_phase ph = tlm::END_REQ;
+			slave_sock->nb_transport_bw(*pending_rd_request,ph,delay);
+			pending_rd_request=NULL;
+		}
+		if ((pending_wr_request != NULL) && (wr_elastic_buffer.num_free() > 0))
+		{
+			tlm::tlm_phase ph = tlm::END_REQ;
+			slave_sock->nb_transport_bw(*pending_wr_request,ph,delay);
+			pending_wr_request=NULL;
+		}
+		if ((pending_wr_data_request != NULL) && (wdata_buf->num_free() > 0))
+		{
+			tlm::tlm_phase ph = amba::END_DATA;
+			slave_sock->nb_transport_bw(*pending_wr_data_request,ph,delay);
+			pending_wr_data_request=NULL;
+		}
+		if ((curr_state == if_IDLE) || (curr_state == if_WRITE))
+		{
+			//priority to reads
+			if ((rdcmd_pipe_out.is_full()) && (checkNoOlderWrite(boost::any_cast<Cmd>(*(rdcmd_pipe_out.peek()).get()))))
+			{
+				cmd_pkt=boost::any_cast<Cmd>(*(rdcmd_pipe_out.get()).get())._cmd;
+				curr_state=if_READ;
+			}
+			else if (( wrcmd_pipe_out.is_full() ) && (checkNoOlderRead(boost::any_cast<Cmd>(*(wrcmd_pipe_out.peek()).get()))))
+			{
+				cmd_pkt=boost::any_cast<Cmd>(*(wrcmd_pipe_out.peek()).get())._cmd;
+				if (_wdata_available >= cmd_pkt.cbytecnt)
+				{
+					curr_state=if_WRITE;
+					cmd_pkt=boost::any_cast<Cmd>(*(wrcmd_pipe_out.get()).get())._cmd;
+				}
+				else
+					curr_state = if_IDLE;
+			}
+			else
+				curr_state = if_IDLE;
+		}
+		else // means curr_state == if_READ
+		{
+			//priority to writes
+			if (( wrcmd_pipe_out.is_full() ) && (checkNoOlderRead(boost::any_cast<Cmd>(*(wrcmd_pipe_out.peek()).get()))))
+			{
+				cmd_pkt=boost::any_cast<Cmd>(*(wrcmd_pipe_out.peek()).get())._cmd;
+				if (_wdata_available >= cmd_pkt.cbytecnt)
+				{
+					curr_state=if_WRITE;
+					cmd_pkt=boost::any_cast<Cmd>(*(wrcmd_pipe_out.get()).get())._cmd;
+				}
+			}
+			if ((curr_state == if_READ) && (rdcmd_pipe_out.is_full()) && (checkNoOlderWrite(boost::any_cast<Cmd>(*(rdcmd_pipe_out.peek()).get()))))
+			{
+				cmd_pkt=boost::any_cast<Cmd>(*(rdcmd_pipe_out.get()).get())._cmd;
+				curr_state=if_READ;
+			}
+			else if (curr_state == if_READ)
+				curr_state = if_IDLE;			
+		}
+		if (curr_state != if_IDLE)
+		{
+			if (cmd_pkt.cdir == CBA::READ)
+			{
+				assert(rdcmd_in_flight.front()._cmd.id.id() == cmd_pkt.id.id());
+				rdcmd_in_flight.pop_front();
+			}
+			else
+			{
+				assert(wrcmd_in_flight.front()._cmd.id.id() == cmd_pkt.id.id());
+				wrcmd_in_flight.pop_front();
+			}
+			bus_if->put_raw_cmd_pkt(cmd_pkt);
+		}
+	 	if (curr_state == if_WRITE)
+	 	{
+		  wr_data_size.write(cmd_pkt.cbytecnt);
+		  _wdata_available -= cmd_pkt.cbytecnt;
+	  	}
+	}
+}
+
+
+template<unsigned int BUSWIDTH>
+void EagleNest<BUSWIDTH>::master_wr_thread()
+{
+	vbusm_wr_pkt wr_pkt;
+	uint32_t data_size=0;
+	boost::shared_ptr<boost::any> tmp;
+	while(true)
+	{
+		data_size=wr_data_size.read();
+		wait(vbusm_clk_period);
+		while(data_size > 0)
+		{
+			assert(wdata_pipe_out.is_full());
+			tmp=wdata_pipe_out.get();
+			wr_pkt=boost::any_cast<vbusm_wr_pkt>(*tmp.get());
+			data_size -= wr_pkt.wxcnt;
+			bus_if->put_raw_wr_pkt(&wr_pkt,1);
+		}
+		assert(data_size == 0);
+	}
+}
+
+
+template<unsigned int BUSWIDTH>
+void EagleNest<BUSWIDTH>::master_rd_thread()
+{
+	vbusm_rd_pkt rd_pkt;
+	while(true) 
+	{
+		rd_pkt=bus_if->get_raw_rd_pkt();
+		wait(_vbusm_clk.next_posedge_delta());
+		rdata_pipe_in.put(boost::shared_ptr<boost::any>(new boost::any(rd_pkt)));
+	}
+}
+
+
+template<unsigned int BUSWIDTH>
+void EagleNest<BUSWIDTH>::master_ws_thread()
+{
+	CBA::transaction_id id;
+	bool done;
+	vbusm_wrstatus_pkt ws_pkt;
+	while (true) 
+	{
+		ws_pkt=bus_if->get_raw_wrstatus_pkt();
+		assert(ws_pkt.sdone); // should always be the case
+		wait(_vbusm_clk.next_posedge_delta());
+		ws_pipe_in.put(boost::shared_ptr<boost::any>(new boost::any(ws_pkt)));
+	}
+}
+
+/*
+ * We will have to assume GEM5 always sends INCR transactions (I doubt it can issue WRAP ones)
+ * 
+ */
+
+template<unsigned int BUSWIDTH>
+vbusm_cmd_pkt EagleNest<BUSWIDTH>::compute_vbusm_read(tlm::tlm_generic_payload * trans)
+{
+	amba::amba_burst_size * size;
+	amba::amba_id * m_id;
+	amba::amba_exclusive * m_exclusive;
+	uint64_t address;
+	vbusm_cmd_pkt vbusm_cmd;
+    vbusm_cmd.cflags.set_clsize_raw(64);
+    vbusm_cmd.cpriority=_vbusm_priority_cfg;
+    vbusm_cmd.cdir=CBA::READ;
+    vbusm_cmd.cdone=1;
+	assert(trans->get_command()==tlm::TLM_READ_COMMAND);
+	vbusm_cmd.caddress=(uint32_t)trans->get_address();
+	vbusm_cmd.caddress.set_address_ext(trans->get_address() >> 32);
+	//FIXME: GEM5 propagates source ID not core ID (core,L2 and so on) so let's extend the ID range a bit to compensate
+	slave_sock.template get_extension<amba::amba_id>(m_id,*trans);
+	vbusm_cmd.id.set_id(m_id->value&0xF);
+	vbusm_cmd.id.set_mstid((_cluster_id << 3) + (m_id->value >> 4));
+	//  Endpoint                 Address range                                              crsel
+	//-------------------------------------------------------------------------------------------
+	// Long distance | 00:0000_0000 to 00:FFFF_FFFF except MSMC RAM and MSMC Config spaces  | 0
+	// MSMC RAM      |        00:0C00_0000 to 00:0FFF_FFFF                                  | 1
+	// EMIF*         |        01:0000_0000 to 0F:FFFF_FFFF                                  | 2
+//	if ((trans->get_address() >= 0x0C000000) && (trans->get_address() <= 0x0FFFFFFF))
+//		vbusm_cmd.caddress.set_rsel(1);
+//	else if (trans->get_address() < 0xFFFFFFFF)
+//		vbusm_cmd.caddress.set_rsel(0);
+//	else
+//		vbusm_cmd.caddress.set_rsel(2);
+	if ((!_linux_remap) && (trans->get_address() >= 0x01F00000) && (trans->get_address() <= 0x030FFFFF))
+	{
+		vbusm_cmd.caddress.set_rsel(0);
+	}
+	else if (trans->get_address() <= 0x10000000)
+	{
+		if (!_linux_remap)
+			vbusm_cmd.caddress.set_rsel(1);
+		else
+			vbusm_cmd.caddress.set_rsel(2);
+	}
+//	else if (trans->get_address() >= 0x22000000)
+//		vbusm_cmd.caddress.set_rsel(2);
+	else
+		vbusm_cmd.caddress.set_rsel(2);
+	_rd_return_address[vbusm_cmd.id.id()]=trans->get_address();
+	//ccaable = axcache[1] AND (axcache[2] OR axcache[3]) AND crsel == EMIF
+/*FIXME	if (slave_sock.template get_extension<amba::amba_read_allocate>(*trans) && ((slave_sock.template get_extension<amba::amba_cacheable>(*trans)) || (slave_sock.template get_extension<amba::amba_bufferable>(*trans))) && (vbusm_cmd.caddress.rsel() == 2))
+		vbusm_cmd.cflags.set_caable();
+	else
+		vbusm_cmd.cflags.clr_caable();*/
+	if (slave_sock.template get_extension<amba::amba_instruction>(*trans))
+		vbusm_cmd.cflags.set_dtype(CBA::DT_CPU_INST);
+	else
+		vbusm_cmd.cflags.set_dtype(CBA::DT_CPU_DATA);
+	if (slave_sock.template get_extension<amba::amba_exclusive>(m_exclusive,*trans))
+		vbusm_cmd.cflags.set_excl();
+	else
+		vbusm_cmd.cflags.clr_excl();
+	if (slave_sock.template get_extension<amba::amba_cacheable>(*trans))
+		vbusm_cmd.cflags.set_caable();
+	else
+		vbusm_cmd.cflags.clr_caable();
+		
+	vbusm_cmd.cbytecnt=trans->get_data_length(); 
+	
+	/*if (trans->get_data_length() == 64)//Cacheline AXI Transactions 
+	{
+		vbusm_cmd.cbytecnt=64;		
+	}
+	else // non Cacheline AXI Transactions , tbd!!
+	{
+		if (!slave_sock.template get_extension<amba::amba_burst_size>(size, *trans))
+		  size->value=BUSWIDTH/8;
+		vbusm_cmd.cbytecnt = size->value - (vbusm_cmd.caddress % size->value);
+		if (trans->get_data_length() > vbusm_cmd.cbytecnt)
+		{
+			trans->set_data_length(trans->get_data_length()-vbusm_cmd.cbytecnt);
+			trans->set_address(trans->get_address()+vbusm_cmd.cbytecnt);
+			rd_elastic_buffer.write(trans);
+		}
+	}*/
+	return vbusm_cmd;
+}
+
+
+template<unsigned int BUSWIDTH>
+void EagleNest<BUSWIDTH>::read_command_splitting_thread()
+{
+	Cmd vbusm_cmd;
+	while(true)
+	{
+		vbusm_cmd=rd_elastic_buffer.read();
+		if (vbusm_cmd._cmd.cbytecnt==64)
+		{
+			rdcmd_pipe_in.put(boost::shared_ptr<boost::any>(new boost::any(vbusm_cmd)));
+			rdata_reordering_queue.push_back(vbusm_cmd);
+			rdcmd_in_flight.push_back(vbusm_cmd);
+		}
+		else // non Cacheline AXI Transactions , tbd!!
+		{		
+/*			vbusm_cmd.cbytecnt = size->value - (vbusm_cmd.caddress % size->value);
+			if (BUSWIDTH/8 < vbusm_cmd.cbytecnt)
+			{
+				vbusm_cmd_pkt tmp_vbusm_cmd=vbusm_cmd;
+				tmp_vbusm_cmd.cbytecnt=
+				rd_cmd_buf->write(vbusm_cmd);
+				vbusm_cmd.cbytecnt -= BUSWIDTH/8;
+				vbusm_cmd.caddress += vbusm_cmd.cbytecnt;
+				rd_elastic_buffer.write(vbusm_cmd);
+			}
+			else
+				rd_cmd_buf->write(vbusm_cmd);*/
+			rdcmd_pipe_in.put(boost::shared_ptr<boost::any>(new boost::any(vbusm_cmd)));
+			rdata_reordering_queue.push_back(vbusm_cmd);
+			rdcmd_in_flight.push_back(vbusm_cmd);
+		}
+	}
+}
+
+template<unsigned int BUSWIDTH>
+vbusm_cmd_pkt EagleNest<BUSWIDTH>::compute_vbusm_write(tlm::tlm_generic_payload * trans)
+{
+	amba::amba_burst_size * size;
+	amba::amba_id * m_id;
+	amba::amba_exclusive * m_exclusive;
+	uint64_t address;
+	vbusm_cmd_pkt vbusm_cmd;
+    vbusm_cmd.cflags.set_clsize_raw(64);
+	vbusm_cmd.cflags.set_dtype(CBA::DT_CPU_DATA);
+    vbusm_cmd.cpriority=_vbusm_priority_cfg;
+    vbusm_cmd.cdir=CBA::WRITE;
+    vbusm_cmd.cdone=1;
+	assert(trans->get_command()==tlm::TLM_WRITE_COMMAND);
+	vbusm_cmd.caddress=(uint32_t)trans->get_address();
+	vbusm_cmd.caddress.set_address_ext(trans->get_address() >> 32);
+	//FIXME: GEM5 propagates source ID not core ID (core,L2 and so on) so let's extend the ID range a bit to compensate
+	slave_sock.template get_extension<amba::amba_id>(m_id,*trans);
+	vbusm_cmd.id.set_id(m_id->value&0xF);
+	vbusm_cmd.id.set_mstid((_cluster_id << 3) + (m_id->value >> 4));
+	//  Endpoint                 Address range                                              crsel
+	//-------------------------------------------------------------------------------------------
+	// Long distance | 00:0000_0000 to 00:FFFF_FFFF except MSMC RAM and MSMC Config spaces  | 0
+	// MSMC RAM      |        00:0C00_0000 to 00:0FFF_FFFF                                  | 1
+	// EMIF*         |        01:0000_0000 to 0F:FFFF_FFFF                                  | 2
+	//if ((trans->get_address() >= 0x0C000000) && (trans->get_address() <= 0x0FFFFFFF))
+		//vbusm_cmd.caddress.set_rsel(1);
+	//else if (trans->get_address() < 0xFFFFFFFF)
+		//vbusm_cmd.caddress.set_rsel(0);
+	//else
+		//vbusm_cmd.caddress.set_rsel(2);
+	if ((!_linux_remap) && (trans->get_address() >= 0x01F00000) && (trans->get_address() <= 0x030FFFFF))
+	{
+		vbusm_cmd.caddress.set_rsel(0);
+	}
+	else if (trans->get_address() <= 0x10000000)
+	{
+		if (!_linux_remap)
+			vbusm_cmd.caddress.set_rsel(1);
+		else
+			vbusm_cmd.caddress.set_rsel(2);
+	}
+//	else if (trans->get_address() >= 0x22000000)
+//		vbusm_cmd.caddress.set_rsel(2);
+	else
+		vbusm_cmd.caddress.set_rsel(2);
+
+	//ccaable = axcache[1] AND (axcache[2] OR axcache[3]) AND crsel == EMIF
+/*FIXME	if (slave_sock.template get_extension<amba::amba_read_allocate>(*trans) && ((slave_sock.template get_extension<amba::amba_cacheable>(*trans)) || (slave_sock.template get_extension<amba::amba_bufferable>(*trans))) && (vbusm_cmd.caddress.rsel() == 2))
+		vbusm_cmd.cflags.set_caable();
+	else
+		vbusm_cmd.cflags.clr_caable();*/
+	if (slave_sock.template get_extension<amba::amba_exclusive>(m_exclusive,*trans))
+		vbusm_cmd.cflags.set_excl();
+	else
+		vbusm_cmd.cflags.clr_excl();
+	if (slave_sock.template get_extension<amba::amba_cacheable>(*trans))
+		vbusm_cmd.cflags.set_caable();
+	else
+		vbusm_cmd.cflags.clr_caable();
+	
+	vbusm_cmd.cbytecnt=trans->get_data_length(); 
+		
+	/*if (trans->get_data_length() == 64)//Cacheline AXI Transactions 
+	{
+		vbusm_cmd.cbytecnt=64;
+//			send_write_data_buffer.push(trans->get_data_ptr());
+		transactions_pool[vbusm_cmd.id.id()]=trans;
+	}
+	else // non Cacheline AXI Transactions TBD!!
+	{
+		if (!slave_sock.template get_extension<amba::amba_burst_size>(size, *trans))
+		  size->value=BUSWIDTH/8;
+		vbusm_cmd.cbytecnt = size->value - (vbusm_cmd.caddress % size->value);
+		if (trans->get_data_length() == vbusm_cmd.cbytecnt)
+		{
+			transactions_pool[vbusm_cmd.id.id()]=trans;
+		}
+		else
+		{
+			trans->set_data_length(trans->get_data_length()-vbusm_cmd.cbytecnt);
+			trans->set_address(trans->get_address()+vbusm_cmd.cbytecnt);
+//		send_write_data_buffer.push(trans->get_data_ptr());
+//		trans->set_data_ptr(&send_write_data_buffer.front()[vbusm_cmd.cbytecnt]);
+			wr_elastic_buffer.write(trans);
+		}
+	}*/
+	return vbusm_cmd;
+}
+
+template<unsigned int BUSWIDTH>
+void EagleNest<BUSWIDTH>::write_command_splitting_thread()
+{
+	Cmd vbusm_cmd;
+	while(true)
+	{
+		vbusm_cmd=wr_elastic_buffer.read();
+		if (vbusm_cmd._cmd.cbytecnt==64)
+		{
+			wrcmd_pipe_in.put(boost::shared_ptr<boost::any>(new boost::any(vbusm_cmd)));
+			wstatus_reordering_queue.push_back(vbusm_cmd);
+			wrcmd_in_flight.push_back(vbusm_cmd);
+		}
+		else // non Cacheline AXI Transactions , tbd!!
+		{		
+	/*			vbusm_cmd.cbytecnt = size->value - (vbusm_cmd.caddress % size->value);
+			if (BUSWIDTH/8 < vbusm_cmd.cbytecnt)
+			{
+				vbusm_cmd_pkt tmp_vbusm_cmd=vbusm_cmd;
+				tmp_vbusm_cmd.cbytecnt=
+				rd_cmd_buf->write(vbusm_cmd);
+				vbusm_cmd.cbytecnt -= BUSWIDTH/8;
+				vbusm_cmd.caddress += vbusm_cmd.cbytecnt;
+				rd_elastic_buffer.write(vbusm_cmd);
+			}
+			else
+				rd_cmd_buf->write(vbusm_cmd);*/
+			wrcmd_pipe_in.put(boost::shared_ptr<boost::any>(new boost::any(vbusm_cmd)));
+			wstatus_reordering_queue.push_back(vbusm_cmd);
+			wrcmd_in_flight.push_back(vbusm_cmd);
+		}
+	}
+}
+
+template<unsigned int BUSWIDTH>
+void EagleNest<BUSWIDTH>::Empty_stage_func(std::string _name, uint32_t id,bus_channel_in<boost::shared_ptr<boost::any> >* in,bus_channel_out<boost::shared_ptr<boost::any> >* out, sc_core::sc_event* evt)
+{
+	boost::shared_ptr<boost::any> tmp;
+	while(true)
+	{
+//		DBG_PIPE_MSG( "Starting " << _name << " id=" << id << " at time=" << sc_core::sc_time_stamp() << " delta " << sc_core::sc_delta_count());
+		if ((*in)[id]->is_empty())
+			wait((*in)[id]->channel_full_event());
+		wait(*evt);
+		DBG_PIPE_MSG( "Running " << _name << " id=" << id << " at time=" << sc_core::sc_time_stamp() << " delta " << sc_core::sc_delta_count());
+		tmp = (*in)[id]->get();
+		(*out)[id]->put(tmp);
+	}
+}
+
+template<unsigned int BUSWIDTH>
+void EagleNest<BUSWIDTH>::rdcmd_push_sync(std::string _name, uint32_t id,bus_channel_in<boost::shared_ptr<boost::any> >* in,bus_channel_out<boost::shared_ptr<boost::any> >* out, sc_core::sc_event* evt)
+{
+	boost::shared_ptr<boost::any> tmp;
+	while(true)
+	{
+		if ((*in)[id]->is_empty())
+			wait((*in)[id]->channel_full_event());
+		wait(*evt);
+		DBG_PIPE_MSG( "Running " << _name << " id=" << id << " at time=" << sc_core::sc_time_stamp() << " delta " << sc_core::sc_delta_count());
+		tmp = (*in)[id]->get();
+		rd_cmd_buf->write(boost::any_cast<Cmd>(*tmp.get()));
+	}
+}
+
+template<unsigned int BUSWIDTH>
+void EagleNest<BUSWIDTH>::wrcmd_push_sync(std::string _name, uint32_t id,bus_channel_in<boost::shared_ptr<boost::any> >* in,bus_channel_out<boost::shared_ptr<boost::any> >* out, sc_core::sc_event* evt)
+{
+	boost::shared_ptr<boost::any> tmp;
+	while(true)
+	{
+		if ((*in)[id]->is_empty())
+			wait((*in)[id]->channel_full_event());
+		wait(*evt);
+		DBG_PIPE_MSG( "Running " << _name << " id=" << id << " at time=" << sc_core::sc_time_stamp() << " delta " << sc_core::sc_delta_count());
+		tmp = (*in)[id]->get();
+		wr_cmd_buf->write(boost::any_cast<Cmd>(*tmp.get()));
+	}
+}
+
+template<unsigned int BUSWIDTH>
+void EagleNest<BUSWIDTH>::wdata_push_sync(std::string _name, uint32_t id,bus_channel_in<boost::shared_ptr<boost::any> >* in,bus_channel_out<boost::shared_ptr<boost::any> >* out, sc_core::sc_event* evt)
+{
+	boost::shared_ptr<boost::any> tmp;
+	while(true)
+	{
+		if ((*in)[id]->is_empty())
+			wait((*in)[id]->channel_full_event());
+		wait(*evt);
+		DBG_PIPE_MSG( "Running " << _name << " id=" << id << " at time=" << sc_core::sc_time_stamp() << " delta " << sc_core::sc_delta_count());
+		tmp = (*in)[id]->get();
+		wdata_buf->write(boost::any_cast<WrData>(*tmp.get()));
+	}
+}
+
+template<unsigned int BUSWIDTH>
+void EagleNest<BUSWIDTH>::rdata_push_sync(std::string _name, uint32_t id,bus_channel_in<boost::shared_ptr<boost::any> >* in,bus_channel_out<boost::shared_ptr<boost::any> >* out, sc_core::sc_event* evt)
+{
+	boost::shared_ptr<boost::any> tmp;
+	while(true)
+	{
+		if ((*in)[id]->is_empty())
+			wait((*in)[id]->channel_full_event());
+		wait(*evt);
+		DBG_PIPE_MSG( "Running " << _name << " id=" << id << " at time=" << sc_core::sc_time_stamp() << " delta " << sc_core::sc_delta_count());
+		tmp = (*in)[id]->get();
+		rdata_fifo->write(boost::any_cast<vbusm_rd_pkt>(*tmp.get()));
+	}
+}
+
+template<unsigned int BUSWIDTH>
+void EagleNest<BUSWIDTH>::ws_push_sync(std::string _name, uint32_t id,bus_channel_in<boost::shared_ptr<boost::any> >* in,bus_channel_out<boost::shared_ptr<boost::any> >* out, sc_core::sc_event* evt)
+{
+	boost::shared_ptr<boost::any> tmp;
+	while(true)
+	{
+		if ((*in)[id]->is_empty())
+			wait((*in)[id]->channel_full_event());
+		wait(*evt);
+		DBG_PIPE_MSG( "Running " << _name << " id=" << id << " at time=" << sc_core::sc_time_stamp() << " delta " << sc_core::sc_delta_count());
+		tmp = (*in)[id]->get();
+		wrstat_fifo->write(boost::any_cast<vbusm_wrstatus_pkt>(*tmp.get()));
+	}
+}
+
+template<unsigned int BUSWIDTH>
+void EagleNest<BUSWIDTH>::rdcmd_pop_sync(std::string _name, uint32_t id,bus_channel_in<boost::shared_ptr<boost::any> >* in,bus_channel_out<boost::shared_ptr<boost::any> >* out, sc_core::sc_event* evt)
+{
+	boost::shared_ptr<boost::any> tmp;
+	while(true)
+	{
+		tmp=boost::shared_ptr<boost::any>(new boost::any(rd_cmd_buf->read()));
+		wait(*evt);
+		DBG_PIPE_MSG( "Running " << _name << " id=" << id << " at time=" << sc_core::sc_time_stamp() << " delta " << sc_core::sc_delta_count());
+		(*out)[id]->put(tmp);
+	}
+}
+
+template<unsigned int BUSWIDTH>
+void EagleNest<BUSWIDTH>::wrcmd_pop_sync(std::string _name, uint32_t id,bus_channel_in<boost::shared_ptr<boost::any> >* in,bus_channel_out<boost::shared_ptr<boost::any> >* out, sc_core::sc_event* evt)
+{
+	boost::shared_ptr<boost::any> tmp;
+	while(true)
+	{
+		tmp=boost::shared_ptr<boost::any>(new boost::any(wr_cmd_buf->read()));
+		wait(*evt);
+		DBG_PIPE_MSG( "Running " << _name << " id=" << id << " at time=" << sc_core::sc_time_stamp() << " delta " << sc_core::sc_delta_count());
+		(*out)[id]->put(tmp);
+	}
+}
+
+template<unsigned int BUSWIDTH>
+void EagleNest<BUSWIDTH>::wdata_pop_sync(std::string _name, uint32_t id,bus_channel_in<boost::shared_ptr<boost::any> >* in,bus_channel_out<boost::shared_ptr<boost::any> >* out, sc_core::sc_event* evt)
+{
+	boost::shared_ptr<boost::any> tmp;
+	WrData wr_pkt;
+	WrData wr_pkt2;
+	uint32_t width = BUSWIDTH / 8;
+	while(true)
+	{
+		wr_pkt = wdata_buf->read();
+		wait(*evt);
+		DBG_PIPE_MSG( "Running " << _name << " id=" << id << " at time=" << sc_core::sc_time_stamp() << " delta " << sc_core::sc_delta_count());
+		wr_pkt._pkt.walign = wr_pkt.walign_2x;
+		if (wr_pkt._pkt.walign >= width) // align to new width
+		{
+			wr_pkt._pkt.wbyten = wr_pkt._pkt.wbyten << width;
+			for (uint32_t i=0;i<width;i++)
+				wr_pkt._pkt.wdata[i+width] = wr_pkt._pkt.wdata[i];
+		}
+		if ((wr_pkt._pkt.wlast) || ((wr_pkt.walign_2x + wr_pkt._pkt.wxcnt) >= 2*width))
+		{
+			tmp=boost::shared_ptr<boost::any>(new boost::any(wr_pkt._pkt));
+			(*out)[id]->put(tmp);
+		}
+		else if (wr_pkt._pkt.wfirst)
+		{
+			// will have to wait for another packet to pack
+			wr_pkt2 = wdata_buf->read();
+			wait(*evt);
+			DBG_PIPE_MSG( "Running " << _name << " id=" << id << " at time=" << sc_core::sc_time_stamp() << " delta " << sc_core::sc_delta_count());
+			wr_pkt._pkt.wfirst = wr_pkt._pkt.wfirst || wr_pkt2._pkt.wfirst;
+			wr_pkt._pkt.wlast = wr_pkt._pkt.wlast || wr_pkt2._pkt.wlast;
+			wr_pkt._pkt.wxcnt += wr_pkt2._pkt.wxcnt;
+			wr_pkt._pkt.wbyten = uint32_t((uint64_t(1) << wr_pkt._pkt.wxcnt) -1); // FIXME
+			for (uint32_t i=0;i<width;i++)
+				wr_pkt._pkt.wdata[i+width]= wr_pkt2._pkt.wdata[i];
+			tmp=boost::shared_ptr<boost::any>(new boost::any(wr_pkt._pkt));
+			(*out)[id]->put(tmp);
+		}
+		else
+		{
+			// will have to wait for another packet to pack
+			wr_pkt2 = wdata_buf->read();
+			wait(*evt);
+			DBG_PIPE_MSG( "Running " << _name << " id=" << id << " at time=" << sc_core::sc_time_stamp() << " delta " << sc_core::sc_delta_count());
+			wr_pkt._pkt.wlast = wr_pkt._pkt.wlast || wr_pkt2._pkt.wlast;
+			wr_pkt._pkt.wxcnt += wr_pkt2._pkt.wxcnt;
+			wr_pkt._pkt.wbyten = uint32_t((uint64_t(1) << wr_pkt._pkt.wxcnt) -1); // FIXME
+			for (uint32_t i=0;i<width;i++)
+				wr_pkt._pkt.wdata[i+width]= wr_pkt2._pkt.wdata[i];
+			tmp=boost::shared_ptr<boost::any>(new boost::any(wr_pkt._pkt));
+			(*out)[id]->put(tmp);
+		}
+	}
+}
+
+template<unsigned int BUSWIDTH>
+void EagleNest<BUSWIDTH>::rdata_pop_sync(std::string _name, uint32_t id,bus_channel_in<boost::shared_ptr<boost::any> >* in,bus_channel_out<boost::shared_ptr<boost::any> >* out, sc_core::sc_event* evt)
+{
+	boost::shared_ptr<boost::any> tmp;
+	while(true)
+	{
+		tmp=boost::shared_ptr<boost::any>(new boost::any(rdata_fifo->read()));
+		wait(*evt);
+		DBG_PIPE_MSG( "Running " << _name << " id=" << id << " at time=" << sc_core::sc_time_stamp() << " delta " << sc_core::sc_delta_count());
+		(*out)[id]->put(tmp);
+	}
+}
+
+template<unsigned int BUSWIDTH>
+void EagleNest<BUSWIDTH>::ws_pop_sync(std::string _name, uint32_t id,bus_channel_in<boost::shared_ptr<boost::any> >* in,bus_channel_out<boost::shared_ptr<boost::any> >* out, sc_core::sc_event* evt)
+{
+	boost::shared_ptr<boost::any> tmp;
+	while(true)
+	{
+		tmp=boost::shared_ptr<boost::any>(new boost::any(wrstat_fifo->read()));
+		wait(*evt);
+		DBG_PIPE_MSG( "Running " << _name << " id=" << id << " at time=" << sc_core::sc_time_stamp() << " delta " << sc_core::sc_delta_count());
+		(*out)[id]->put(tmp);
+	}
+}
+
+template<unsigned int BUSWIDTH>
+void EagleNest<BUSWIDTH>::wdata_e3_stage(std::string _name, uint32_t id,bus_channel_in<boost::shared_ptr<boost::any> >* in,bus_channel_out<boost::shared_ptr<boost::any> >* out, sc_core::sc_event* evt)
+{
+	boost::shared_ptr<boost::any> tmp;
+	while(true)
+	{
+		if ((*in)[id]->is_empty())
+			wait((*in)[id]->channel_full_event());
+		wait(*evt);
+		DBG_PIPE_MSG( "Running " << _name << " id=" << id << " at time=" << sc_core::sc_time_stamp() << " delta " << sc_core::sc_delta_count());
+		tmp = (*in)[id]->get();
+		vbusm_wr_pkt wr_pkt = boost::any_cast<vbusm_wr_pkt>(*tmp.get());
+		_wdata_available += wr_pkt.wxcnt;
+		(*out)[id]->put(tmp);
+	}
+}
+
+void TemporaryFunctionEagleNest ()
+{
+    EagleNest<128>* tmp = new EagleNest<128>("128b_EagleNest","SlavePort","MasterPort");
+}
+
+ostream & operator<<(ostream &os, const Cmd &p)
+{
+	os << p._cmd;
+	os << " _ts " << p._ts;
+	os << " _return_valid " << p._return_valid;
+	return os;
+}
