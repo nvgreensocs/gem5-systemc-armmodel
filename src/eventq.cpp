@@ -117,11 +117,11 @@ Event::insertBefore(Event *event, Event *curr)
 void
 EventQueue::insert(Event *event)
 {
-	curTick(sc_core::sc_time_stamp().value());
+	setCurTick(sc_core::sc_time_stamp().value());
 	if (gem5_event_queue.cp_timestamp)
 		event->setWhen(event->when()-gem5_event_queue.cp_timestamp,&mainEventQueue);
 
-	assert(event->when() >= curTick());
+	assert(event->when() >= getCurTick());
     // Deal with the head case
     if (!head || *event <= *head) {
         head = Event::insertBefore(event, head);
@@ -177,13 +177,13 @@ Event::removeItem(Event *event, Event *top)
 void
 EventQueue::remove(Event *event)
 {
-	curTick(sc_core::sc_time_stamp().value());	
+	setCurTick(sc_core::sc_time_stamp().value());	
 //	std::cout << "WARNING:removed event trigger for time " << sc_time(event->when()-curTick(),sc_core::SC_PS)+sc_core::sc_time_stamp() << std::endl;
     if (head == NULL)
         panic("event not found!");
         
     //cancel delayed notification
-    gem5_cancelled_events.insert(sc_time(event->when()-curTick(),sc_core::SC_PS)+sc_core::sc_time_stamp());
+    gem5_cancelled_events.insert(sc_time(double(event->when()-getCurTick()),sc_core::SC_PS)+sc_core::sc_time_stamp());
 
     // deal with an event on the head's 'in bin' list (event has the same
     // time as the head)
@@ -209,20 +209,11 @@ EventQueue::remove(Event *event)
     prev->nextBin = Event::removeItem(event, curr);
 }
 
-Event*
-EventQueue::replaceHead(Event* s)
-{
-    Event* t = head;
-    head = s;
-    return t;
-}
-
-
 Event *
 EventQueue::serviceOne()
 {
     Event *event = head;
-	assert(event->when() == curTick());
+	assert(event->when() == getCurTick());
     Event *next = head->nextInBin;
     event->flags.clear(Event::Scheduled);
 
@@ -240,6 +231,9 @@ EventQueue::serviceOne()
 
     // handle action
     if (!event->squashed()) {
+        // forward current cycle to the time when this event occurs.
+        setCurTick(event->when());
+
         event->process();
         if (event->isExitEvent()) {
         	assert(!event->flags.isSet(Event::AutoDelete)); // would be dumb
@@ -263,6 +257,7 @@ EventQueue::serviceOne()
         	}
         	else
         	{
+        		sc_core::sc_stop();
 				uint32_t total_cores = CortexA15::_global_num_cores;
 				for (std::map<std::string,CortexA15*>::iterator iter = CortexA15::CA15.begin();iter != CortexA15::CA15.end();++iter)
 				{
@@ -272,38 +267,38 @@ EventQueue::serviceOne()
 						//assuming single threaded CPU
 						if (iter2->second->tcBase(0)->status() == ThreadContext::Halted)
 						{
-							if (iter->second->_current_request != NULL)
-							{
-								std::list<Stats::Info *> listinfo = Stats::statsList();
-								Stats::Output * output = Stats::initText(iter->second->_current_request->task_name+"_stats.txt",true);
-								for (std::list<Stats::Info *>::iterator iter3=listinfo.begin();iter3!=listinfo.end();++iter3)
-								{
-									(*iter3)->prepare();
-								}
-								if (output->valid())
-								{
-									for (std::list<Stats::Info *>::iterator iter3=listinfo.begin();iter3!=listinfo.end();++iter3)
-									{
-										(*iter3)->visit(*output);
-									}
-								}
-							}
-							num_cores--;
-							total_cores--;
+//							if (iter->second->_current_request != NULL)
+//							{
+								num_cores--;
+								total_cores--;
+//							}
 						}
 					}
-					if ((num_cores == 0) && (iter->second->_current_request != NULL))
-					{
-						iter->second->_current_request->driver_done_event->notify();
-						iter->second->_current_request->done_event->notify();
-						iter->second->_current_request=NULL;
-						iter->second->empty_requests();
-					}
-					else if (total_cores == 0)
-					{
-						sc_core::sc_stop();
-						return event;
-					}
+//					if ((num_cores == 0) && (iter->second->_current_request != NULL))
+//					{
+						std::list<Stats::Info *> listinfo = Stats::statsList();
+						Stats::Output * output = Stats::initText("Task_stats.txt",true);
+						for (std::list<Stats::Info *>::iterator iter3=listinfo.begin();iter3!=listinfo.end();++iter3)
+						{
+							(*iter3)->prepare();
+						}
+						if (output->valid())
+						{
+							for (std::list<Stats::Info *>::iterator iter3=listinfo.begin();iter3!=listinfo.end();++iter3)
+							{
+								(*iter3)->visit(*output);
+							}
+						}
+//						iter->second->_current_request->driver_done_event->notify();
+//						iter->second->_current_request->done_event->notify();
+//						iter->second->_current_request=NULL;
+//						iter->second->empty_requests();
+//					}
+//					else if (total_cores == 0)
+//					{
+//						sc_core::sc_stop();
+//						return event;
+//					}
 				}
 			}
             return event;
@@ -475,6 +470,14 @@ EventQueue::debugVerify() const
     return true;
 }
 
+Event*
+EventQueue::replaceHead(Event* s)
+{
+    Event* t = head;
+    head = s;
+    return t;
+}
+
 void
 dumpMainQueue()
 {
@@ -522,7 +525,7 @@ Event::dump() const
 }
 
 EventQueue::EventQueue(const string &n)
-    : objName(n), head(NULL)
+    : objName(n), head(NULL), _curTick(0)
 {}
 
 

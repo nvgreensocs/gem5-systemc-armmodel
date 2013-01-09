@@ -85,7 +85,8 @@ SimpleMemoryParams* BridgeClassicToAMBATLM2_init(SimpleMemoryParams* pm)
     pm->latency_var=0;
 	pm->null=true;
 	pm->port_port_connection_count=1;
-	pm->range = Range<long long unsigned int>("0x0:+0x1000000000000000");
+	pm->range = AddrRange(0x0,0xFFFFFFFF);
+	pm->clock=1;
 	return pm;
 }
 
@@ -96,7 +97,8 @@ BridgeClassicToAMBATLM2<BUSWIDTH>::BridgeClassicToAMBATLM2(sc_core::sc_module_na
       writeDataQueue(1),
       slavePort(NULL),funcPort(NULL),
       master_sock(ace_master_name.c_str(),amba::amba_AXI, amba::amba_CT,false, gs::socket::GS_TXN_WITH_DATA),
-      debug_port(debug_master_name.c_str())
+      debug_port(debug_master_name.c_str()),
+      _trace_transactions_cfg("trace_on",false)
 {
 	m_Api = gs::cnf::GCnf_Api::getApiInstance(this);
 	
@@ -113,7 +115,7 @@ BridgeClassicToAMBATLM2<BUSWIDTH>::BridgeClassicToAMBATLM2(sc_core::sc_module_na
 		rd_packets[i]=NULL;
 		wr_packets[i]=NULL;
 	}
-	clk_period=m_Api->getValue<sc_core::sc_time>("clk1");
+	clk_period=m_Api->getValue<sc_core::sc_time>("clk1_arm");
 	need_wenable_event=false;
 	
 	SC_THREAD(sendWriteData);
@@ -129,7 +131,7 @@ BridgeClassicToAMBATLM2<BUSWIDTH>::BridgeClassicToAMBATLM2(sc_core::sc_module_na
 template<unsigned int BUSWIDTH>
 void BridgeClassicToAMBATLM2<BUSWIDTH>::send_dummy_response()
 {
-	curTick(sc_core::sc_time_stamp().value());
+	setCurTick(sc_core::sc_time_stamp().value());
 	dummy_pkt.front()->makeTimingResponse();
 	if (bus_stalling)
 	{
@@ -177,18 +179,22 @@ void BridgeClassicToAMBATLM2<BUSWIDTH>::recvRetry()
 {
 #ifdef DEBUG
 	assert(!retryQueue.empty());
-	if (retryQueue.front()->isRead())
+	if (_trace_transactions)
 	{
-		std::cout << "In " << sc_core::sc_object::name() << " at time " << sc_time_stamp() << " sending a READ response to GEM5 with address=0x" << hex << retryQueue.front()->getAddr() << dec << " size=" << retryQueue.front()->getSize();
-		std::cout << hex << " and data= [";
-		for(unsigned j=0;j<retryQueue.front()->getSize(); j++)
-			std::cout << "0x" << uint32_t(retryQueue.front()->getPtr<uint8_t>()[j]) << ",";
-		std::cout << "]" << dec << std::endl;
+		if (retryQueue.front()->isRead())
+		{
+			std::cout << "In " << sc_core::sc_object::name() << " at time " << sc_time_stamp() << " sending a READ response to GEM5 with address=0x" << hex << retryQueue.front()->getAddr() << dec << " size=" << retryQueue.front()->getSize();
+			std::cout << hex << " and data= [";
+			for(unsigned j=0;j<retryQueue.front()->getSize(); j++)
+				std::cout << "0x" << uint32_t(retryQueue.front()->getPtr<uint8_t>()[j]) << ",";
+			std::cout << "]" << dec << std::endl;
+		}
+		else
+			std::cout << "In " << sc_core::sc_object::name() << " at time " << sc_time_stamp() << " sending a WS response to GEM5 with address=0x" << hex << retryQueue.front()->getAddr() << dec << " size=" << retryQueue.front()->getSize() << std::endl;
 	}
-	else
-		std::cout << "In " << sc_core::sc_object::name() << " at time " << sc_time_stamp() << " sending a WS response to GEM5 with address=0x" << hex << retryQueue.front()->getAddr() << dec << " size=" << retryQueue.front()->getSize() << std::endl;
 #endif
-	curTick(sc_core::sc_time_stamp().value());
+//	std::cout << "TLM BEHAVIOR: recvRetry at time " << sc_core::sc_time_stamp() << std::endl;
+	setCurTick(sc_core::sc_time_stamp().value());
 	bool check = slavePort->sendTimingResp(retryQueue.front());
 	assert(check);
 	retryQueue.pop();
@@ -215,6 +221,8 @@ void BridgeClassicToAMBATLM2<BUSWIDTH>::end_of_elaboration()
 	info.set_start_time(tlm::END_RESP,sc_core::sc_time(3,sc_core::SC_PS));
 	master_sock.set_initiator_timing(info);	
 //	master_sock.activate_synchronization_protection();
+
+	_trace_transactions=_trace_transactions_cfg;
 }
 
 template<unsigned int BUSWIDTH>
@@ -255,51 +263,55 @@ void BridgeClassicToAMBATLM2<BUSWIDTH>::sendWriteData()
 			_trans->set_data_length(dp_size);
 			if (burstLen == 1)
 			{
+//				std::cout << "TLM BEHAVIOR: TLM_WRITE_COMMAND & BEGIN_LAST_DATA 1 at time " << sc_core::sc_time_stamp() << "count= " << count << " burstLen=" << burstLen << std::endl;
 				ph= amba::BEGIN_LAST_DATA;
 				last=true;
 			}
 			else
 			{
+//				std::cout << "TLM BEHAVIOR: TLM_WRITE_COMMAND & BEGIN_DATA 1 at time " << sc_core::sc_time_stamp() << std::endl;
 				ph = amba::BEGIN_DATA;
 				last=false;
 			}
 			switch(master_sock->nb_transport_fw(*_trans,ph,delay))
 			{
 				case tlm::TLM_ACCEPTED:
+//					std::cout << "TLM BEHAVIOR: response=TLM_ACCEPTED at time " << sc_core::sc_time_stamp() << std::endl;
 					need_wenable_event=true;
 					wait(wenable_event);
-					count++;
-					address += width;
-					if (!last)
-						bytes_left -= width;
-					//as per packet.cc:74 writeback never needs a response
-					if (last && (pkt->cmd != MemCmd::Writeback))
-						pkt->makeTimingResponse();
-                                        break;
+					break;
 				case tlm::TLM_UPDATED:
+//					std::cout << "TLM BEHAVIOR: response=TLM_UPDATED & END_DATA at time " << sc_core::sc_time_stamp() << std::endl;
 					assert(ph == amba::END_DATA);
-					bytes_left -= dp_size;
-					count++;
-					address += dp_size;
-					//as per packet.cc:74 writeback never needs a response
-					if (last && (pkt->cmd != MemCmd::Writeback))
-						pkt->makeTimingResponse();
 					break;
 				case tlm::TLM_COMPLETED:
+//					std::cout << "TLM BEHAVIOR: response=TLM_COMPLETED at time " << sc_core::sc_time_stamp() << std::endl;
 					abort();
+					break;
+				default:
+					abort();
+					break;
 			}
+			bytes_left -= dp_size;
+			count++;
+			address += dp_size;
+			//as per packet.cc:74 writeback never needs a response
+			if (last && (pkt->cmd != MemCmd::Writeback))
+				pkt->makeTimingResponse();
 		}
 		while(count<burstLen)
 		{
 			_trans->set_address(address);
 			if(count+1 >= burstLen)
 			{
+//				std::cout << "TLM BEHAVIOR: TLM_WRITE_COMMAND & BEGIN_LAST_DATA 2 at time " << sc_core::sc_time_stamp() << "count= " << count << " burstLen=" << burstLen << std::endl;
 				_trans->set_data_length(bytes_left);
 			   ph= amba::BEGIN_LAST_DATA;
 			   last=true;
 		    }
 			else
 			{
+//				std::cout << "TLM BEHAVIOR: TLM_WRITE_COMMAND & BEGIN_DATA 2 at time " << sc_core::sc_time_stamp() << std::endl;
 				_trans->set_data_length(width);
 				last=false;
 			   ph =amba::BEGIN_DATA;
@@ -308,17 +320,19 @@ void BridgeClassicToAMBATLM2<BUSWIDTH>::sendWriteData()
 			switch(master_sock->nb_transport_fw(*_trans,ph,delay))
 			{
 				case tlm::TLM_ACCEPTED: 
+//					std::cout << "TLM BEHAVIOR: received TLM_ACCEPTED at time " << sc_core::sc_time_stamp() << std::endl;
 					need_wenable_event=true;
 					wait(wenable_event);
-					count++;
+					/*count++;
 					address += width;
 					if (!last)
 						bytes_left -= width;
 					//as per packet.cc:74 writeback never needs a response
 					if (last && (pkt->cmd != MemCmd::Writeback))
-						pkt->makeTimingResponse();
+						pkt->makeTimingResponse();*/
 					break;
 				case tlm::TLM_UPDATED:
+//					std::cout << "TLM BEHAVIOR: received TLM_UPDATED & END_DATA at time " << sc_core::sc_time_stamp() << std::endl;
 					assert(ph == amba::END_DATA);
 					count++;
 					address += width;
@@ -329,13 +343,14 @@ void BridgeClassicToAMBATLM2<BUSWIDTH>::sendWriteData()
 						pkt->makeTimingResponse();
 					break;
 				case tlm::TLM_COMPLETED: 
+//					std::cout << "TLM BEHAVIOR: received TLM_COMPLETED at time " << sc_core::sc_time_stamp() << std::endl;
 					abort();
 			}
 			wait(clk_period);
 		}
 		if (needWrRetry)
 		{
-			curTick(sc_core::sc_time_stamp().value());
+			setCurTick(sc_core::sc_time_stamp().value());
 			needWrRetry=false;
 			slavePort->sendRetry();
 		}
@@ -364,6 +379,7 @@ tlm::tlm_sync_enum BridgeClassicToAMBATLM2<BUSWIDTH>::nb_bw_transport(tlm::tlm_g
 			master_sock.template get_extension<amba::amba_id>(m_id,trans);
 			if (trans.is_write())
 			{
+//				std::cout << "TLM BEHAVIOR: received BEGIN_RESP at time " << sc_core::sc_time_stamp() << std::endl;
 			  assert(ph == tlm::BEGIN_RESP);
 			  assert(wr_packets[m_id->value] != NULL);
 			  //as per packet.cc:74 writeback never needs a response
@@ -380,7 +396,7 @@ tlm::tlm_sync_enum BridgeClassicToAMBATLM2<BUSWIDTH>::nb_bw_transport(tlm::tlm_g
 							wr_packets[m_id->value]->req->setExtraData(1);
 						}
 					}
-				  curTick(sc_core::sc_time_stamp().value());
+				  setCurTick(sc_core::sc_time_stamp().value());
 				  if (bus_stalling)
 					  retryQueue.push(wr_packets[m_id->value]);
 				  else if (!slavePort->sendTimingResp(wr_packets[m_id->value]))
@@ -389,7 +405,7 @@ tlm::tlm_sync_enum BridgeClassicToAMBATLM2<BUSWIDTH>::nb_bw_transport(tlm::tlm_g
 						retryQueue.push(wr_packets[m_id->value]);
 				  }	
 #ifdef DEBUG
-				  else
+				  else if (_trace_transactions)
 					std::cout << "In " << sc_core::sc_object::name() << " at time " << sc_time_stamp() << " sending a WS response to GEM5 with address=0x" << hex << trans.get_address() << dec << " size=" << trans.get_data_length() << std::endl;
 #endif
 			  }
@@ -397,13 +413,14 @@ tlm::tlm_sync_enum BridgeClassicToAMBATLM2<BUSWIDTH>::nb_bw_transport(tlm::tlm_g
 			  wr_packets[m_id->value] = NULL;
 				if (needWrIdRetry)
 				{
-					curTick(sc_core::sc_time_stamp().value());
+					setCurTick(sc_core::sc_time_stamp().value());
 					needWrIdRetry=false;
 					slavePort->sendRetry();
 				}
 			}
            else if (ph == amba::BEGIN_LAST_RESP)
            {
+//				std::cout << "TLM BEHAVIOR: received BEGIN_LAST_RESP at time " << sc_core::sc_time_stamp() << std::endl;
 				assert(rd_packets[m_id->value] != NULL);
 				uint8_t * data=trans.get_data_ptr();
 				PacketPtr pkt = rd_packets[m_id->value];
@@ -419,7 +436,7 @@ tlm::tlm_sync_enum BridgeClassicToAMBATLM2<BUSWIDTH>::nb_bw_transport(tlm::tlm_g
 //					else
 //						pkt->req->setExtraData(1);
 //				}
-				curTick(sc_core::sc_time_stamp().value());
+				setCurTick(sc_core::sc_time_stamp().value());
 				if (bus_stalling)
 					retryQueue.push(pkt);
 				else if (!slavePort->sendTimingResp(pkt))
@@ -428,7 +445,7 @@ tlm::tlm_sync_enum BridgeClassicToAMBATLM2<BUSWIDTH>::nb_bw_transport(tlm::tlm_g
 					retryQueue.push(pkt);
 				}	
 #ifdef DEBUG				  						  
-				else
+				else if (_trace_transactions)
 				{
 					std::cout << "In " << sc_core::sc_object::name() << " at time " << sc_time_stamp() << " sending a READ response to GEM5 with address=0x" << hex << shadow_addr << dec << " size=" << shadow_size;
 					std::cout << hex << " and data= [";
@@ -441,20 +458,26 @@ tlm::tlm_sync_enum BridgeClassicToAMBATLM2<BUSWIDTH>::nb_bw_transport(tlm::tlm_g
 				master_sock.release_transaction(&trans);
 				if (needRdIdRetry)
 				{
-					curTick(sc_core::sc_time_stamp().value());
+					setCurTick(sc_core::sc_time_stamp().value());
 					needRdIdRetry=false;
 					slavePort->sendRetry();
 				}
 			}
+           else
+           {
+        	   //received a read data phase
+           }
 			//always accept directly (cf EagleNest spec)
+//			std::cout << "TLM BEHAVIOR: sending  TLM_UPDATED & END_RESP at time " << sc_core::sc_time_stamp() << std::endl;
             ph=tlm::END_RESP;
 			return tlm::TLM_UPDATED;
 		}
 	    else if(ph ==tlm::END_REQ)
 	    { 
+//			std::cout << "TLM BEHAVIOR: received END_REQ and returning TLM_ACCEPTED at time " << sc_core::sc_time_stamp() << std::endl;
 			if (needRetry)
 			{
-				curTick(sc_core::sc_time_stamp().value());
+				setCurTick(sc_core::sc_time_stamp().value());
 				trans.release();
 				needRetry=false;
 				slavePort->sendRetry();
@@ -462,11 +485,13 @@ tlm::tlm_sync_enum BridgeClassicToAMBATLM2<BUSWIDTH>::nb_bw_transport(tlm::tlm_g
 	    }
 		else if(ph== amba::END_DATA )
 		{
+//			std::cout << "TLM BEHAVIOR: received END_DATA and returning TLM_ACCEPTED at time " << sc_core::sc_time_stamp() << std::endl;
 			if (need_wenable_event)
 			{
 				need_wenable_event=false;
             	wenable_event.notify();
 			}
+			return tlm::TLM_ACCEPTED;
 		}
 		else
 				assert("Unexpected phase returned from AXI slave.");	
@@ -487,55 +512,58 @@ tlm::tlm_sync_enum BridgeClassicToAMBATLM2<BUSWIDTH>::nb_bw_transport(tlm::tlm_g
 		msg.str("");
 		tlm::tlm_generic_payload* current_trans;
 		//DPRINTF(BusBridge, "recvTiming: src %d dest %d addr 0x%x\n",pkt->getSrc(), pkt->getDest(), pkt->getAddr());	
-#ifdef DEBUG	
-		if (pkt->cmd == MemCmd::ReadReq)
-			std::cout << "In " << sc_core::sc_object::name() << " at time " << sc_time_stamp() << " received a READ request from GEM5 with address=0x" << hex << pkt->getAddr() << dec << " size=" << pkt->getSize() << std::endl;
-		else if (pkt->cmd == MemCmd::ReadExReq) 
-			std::cout << "In " << sc_core::sc_object::name() << " at time " << sc_time_stamp() << " received a READ EXCLUSIVE request from GEM5 with address=0x" << hex << pkt->getAddr() << dec << " size=" << pkt->getSize() << std::endl;
-		else if (pkt->cmd == MemCmd::WriteReq)
+#ifdef DEBUG
+		if (_trace_transactions)
 		{
-			std::cout << "In " << sc_core::sc_object::name() << " at time " << sc_time_stamp() << " received a WRITE request from GEM5 with address=0x" << hex << pkt->getAddr() << dec << " size=" << pkt->getSize();
-			std::cout << hex << " and data= [";
-			for(unsigned j=0;j<pkt->getSize(); j++)
-				std::cout << "0x" << uint32_t(pkt->getPtr<uint8_t>()[j]) << ",";
-			std::cout << "]" << dec << std::endl;
+			if (pkt->cmd == MemCmd::ReadReq)
+				std::cout << "In " << sc_core::sc_object::name() << " at time " << sc_time_stamp() << " received a READ request from GEM5 with address=0x" << hex << pkt->getAddr() << dec << " size=" << pkt->getSize() << std::endl;
+			else if (pkt->cmd == MemCmd::ReadExReq)
+				std::cout << "In " << sc_core::sc_object::name() << " at time " << sc_time_stamp() << " received a READ EXCLUSIVE request from GEM5 with address=0x" << hex << pkt->getAddr() << dec << " size=" << pkt->getSize() << std::endl;
+			else if (pkt->cmd == MemCmd::WriteReq)
+			{
+				std::cout << "In " << sc_core::sc_object::name() << " at time " << sc_time_stamp() << " received a WRITE request from GEM5 with address=0x" << hex << pkt->getAddr() << dec << " size=" << pkt->getSize();
+				std::cout << hex << " and data= [";
+				for(unsigned j=0;j<pkt->getSize(); j++)
+					std::cout << "0x" << uint32_t(pkt->getPtr<uint8_t>()[j]) << ",";
+				std::cout << "]" << dec << std::endl;
+			}
+			else if (pkt->cmd == MemCmd::Writeback)
+			{
+				std::cout << "In " << sc_core::sc_object::name() << " at time " << sc_time_stamp() << " received a WRITEBACK request from GEM5  with address=0x" << hex << pkt->getAddr() << dec << " size=" << pkt->getSize();
+				std::cout << hex << " and data= [";
+				for(unsigned j=0;j<pkt->getSize(); j++)
+					std::cout << "0x" << uint32_t(pkt->getPtr<uint8_t>()[j]) << ",";
+				std::cout << "]" << dec << std::endl;
+			}
+			else if ((pkt->cmd == MemCmd::UpgradeReq) || (pkt->cmd == MemCmd::SCUpgradeReq))
+			{
+				std::cout << "In " << sc_core::sc_object::name() << " at time " << sc_time_stamp() << " received an UPGRADE request from GEM5  with address=0x" << hex << pkt->getAddr() << dec << " size=" << pkt->getSize() << std::endl;
+			}
+			else if (pkt->cmd == MemCmd::SwapReq)
+			{
+				std::cout << "In " << sc_core::sc_object::name() << " at time " << sc_time_stamp() << " received a SWAP request from GEM5  with address=0x" << hex << pkt->getAddr() << dec << " size=" << pkt->getSize() << std::endl;
+			}
+			else if (pkt->cmd == MemCmd::LoadLockedReq)
+			{
+				std::cout << "In " << sc_core::sc_object::name() << " at time " << sc_time_stamp() << " received an exclusive LOAD request from GEM5  with address=0x" << hex << pkt->getAddr() << dec << " size=" << pkt->getSize() << std::endl;
+			}
+			else if (pkt->cmd == MemCmd::StoreCondReq)
+			{
+				std::cout << "In " << sc_core::sc_object::name() << " at time " << sc_time_stamp() << " received a STORE CONDITIONAL request from GEM5  with address=0x" << hex << pkt->getAddr() << dec << " size=" << pkt->getSize() << std::endl;
+			}
+			else if (pkt->cmd == MemCmd::SwapReq)
+			{
+				std::cout << "In " << sc_core::sc_object::name() << " at time " << sc_time_stamp() << " received a SWAP request from GEM5  with address=0x" << hex << pkt->getAddr() << dec << " size=" << pkt->getSize() << std::endl;
+			}
+			else
+			{
+				std::cout << "In " << sc_core::sc_object::name() << " at time " << sc_time_stamp() << " received an UNKNOWN request from GEM5  with address=0x" << hex << pkt->getAddr() << dec << " size=" << pkt->getSize() << std::endl;
+			}
+			if (pkt->memInhibitAsserted())
+			{
+				std::cout << "In " << sc_core::sc_object::name() << " at time " << sc_time_stamp() << " request from GEM5 was inhibited" << std::endl;
+			}
 		}
-		else if (pkt->cmd == MemCmd::Writeback) 
-		{
-			std::cout << "In " << sc_core::sc_object::name() << " at time " << sc_time_stamp() << " received a WRITEBACK request from GEM5  with address=0x" << hex << pkt->getAddr() << dec << " size=" << pkt->getSize();			
-			std::cout << hex << " and data= [";
-			for(unsigned j=0;j<pkt->getSize(); j++)
-				std::cout << "0x" << uint32_t(pkt->getPtr<uint8_t>()[j]) << ",";
-			std::cout << "]" << dec << std::endl;
-		}
-		else if ((pkt->cmd == MemCmd::UpgradeReq) || (pkt->cmd == MemCmd::SCUpgradeReq))
-		{
-			std::cout << "In " << sc_core::sc_object::name() << " at time " << sc_time_stamp() << " received an UPGRADE request from GEM5  with address=0x" << hex << pkt->getAddr() << dec << " size=" << pkt->getSize() << std::endl;			
-		}
-		else if (pkt->cmd == MemCmd::SwapReq)
-		{
-			std::cout << "In " << sc_core::sc_object::name() << " at time " << sc_time_stamp() << " received a SWAP request from GEM5  with address=0x" << hex << pkt->getAddr() << dec << " size=" << pkt->getSize() << std::endl;			
-		}
-		else if (pkt->cmd == MemCmd::LoadLockedReq)
-		{
-			std::cout << "In " << sc_core::sc_object::name() << " at time " << sc_time_stamp() << " received an exclusive LOAD request from GEM5  with address=0x" << hex << pkt->getAddr() << dec << " size=" << pkt->getSize() << std::endl;
-		}
-		else if (pkt->cmd == MemCmd::StoreCondReq)
-		{
-			std::cout << "In " << sc_core::sc_object::name() << " at time " << sc_time_stamp() << " received a STORE CONDITIONAL request from GEM5  with address=0x" << hex << pkt->getAddr() << dec << " size=" << pkt->getSize() << std::endl;
-		}
-		else if (pkt->cmd == MemCmd::SwapReq)
-		{
-			std::cout << "In " << sc_core::sc_object::name() << " at time " << sc_time_stamp() << " received a SWAP request from GEM5  with address=0x" << hex << pkt->getAddr() << dec << " size=" << pkt->getSize() << std::endl;
-		}
-		else
-		{
-			std::cout << "In " << sc_core::sc_object::name() << " at time " << sc_time_stamp() << " received an UNKNOWN request from GEM5  with address=0x" << hex << pkt->getAddr() << dec << " size=" << pkt->getSize() << std::endl;
-		}
-	    if (pkt->memInhibitAsserted())
-	    {
-	    	std::cout << "In " << sc_core::sc_object::name() << " at time " << sc_time_stamp() << " request from GEM5 was inhibited" << std::endl;
-	    }
 #endif
 	    if (pkt->memInhibitAsserted())
 	    {
@@ -620,10 +648,15 @@ tlm::tlm_sync_enum BridgeClassicToAMBATLM2<BUSWIDTH>::nb_bw_transport(tlm::tlm_g
 			m_id->value=id;
 			master_sock.template validate_extension<amba::amba_id>(*current_trans);
 			
+//			if (pkt->isRead())
+//				std::cout << "TLM BEHAVIOR: sending TLM_READ_COMMAND & BEGIN_REQ at time " << sc_core::sc_time_stamp() << std::endl;
+//			else
+//				std::cout << "TLM BEHAVIOR: sending TLM_WRITE_COMMAND & BEGIN_REQ at time " << sc_core::sc_time_stamp() << std::endl;
 
 			tlm::tlm_sync_enum retval= master_sock->nb_transport_fw(*current_trans,ph,delay);
 			if((retval==tlm::TLM_UPDATED) && (ph == tlm::END_REQ)) // request accepted by Eagle Nest
 			{
+//				std::cout << "TLM BEHAVIOR: received TLM_UPDATED & END_REQ at time " << sc_core::sc_time_stamp() << std::endl;
 				if (pkt->isRead())
 				{
 					rd_packets[id]=pkt;
@@ -637,6 +670,7 @@ tlm::tlm_sync_enum BridgeClassicToAMBATLM2<BUSWIDTH>::nb_bw_transport(tlm::tlm_g
 			}
 			else if(retval== tlm::TLM_ACCEPTED) // request blocked till END_REQ received
 			{
+//				std::cout << "TLM BEHAVIOR: received TLM_ACCEPTED at time " << sc_core::sc_time_stamp() << std::endl;
 				needRetry=true;
 				return false;
 			}
@@ -684,10 +718,6 @@ tlm::tlm_sync_enum BridgeClassicToAMBATLM2<BUSWIDTH>::nb_bw_transport(tlm::tlm_g
 			{
 				std::cout << "MessageReq" << std::endl;
 			}
-			else if (pkt->cmd == MemCmd::NetworkNackError)
-			{
-				std::cout << "NetworkNackError" << std::endl;
-			}
 			else if (pkt->cmd == MemCmd::InvalidDestError)
 			{
 				std::cout << "InvalidDestError" << std::endl;
@@ -711,6 +741,10 @@ tlm::tlm_sync_enum BridgeClassicToAMBATLM2<BUSWIDTH>::nb_bw_transport(tlm::tlm_g
 			else if (pkt->cmd == MemCmd::FlushReq)
 			{
 				std::cout << "FlushReq" << std::endl;
+			}
+			else
+			{
+				std::cout << "Unkwon" << std::endl;
 			}
 			//sc_core::sc_stop();
 		}
@@ -739,7 +773,6 @@ Tick BridgeClassicToAMBATLM2<BUSWIDTH>::recvAtomic(PacketPtr pkt)
 
 //    std::cout << "In " << sc_core::sc_object::name() << " at time " << sc_time_stamp() << " request from GEM5 with address=0x" << hex << pkt->getAddr() << dec << " size=" << pkt->getSize() << std::endl;
     if (pkt->memInhibitAsserted()) {
-    	std::cout << "recvAtomic memInhibitAsserted " << hex << pkt->getAddr() << dec << std::endl;
         return 0;
     }
     if (pkt->cmd == MemCmd::SwapReq)
@@ -810,12 +843,12 @@ Tick BridgeClassicToAMBATLM2<BUSWIDTH>::recvAtomic(PacketPtr pkt)
 }
 
 template<unsigned int BUSWIDTH>
-AddrRangeList BridgeClassicToAMBATLM2<BUSWIDTH>::BridgeSlavePort::getAddrRanges()
+AddrRangeList BridgeClassicToAMBATLM2<BUSWIDTH>::BridgeSlavePort::getAddrRanges() const
 {
 	//FIXME: Ugly hack: whole address range minus small portion
 	AddrRangeList resp;
-	resp.push_back(Range<long long unsigned int>("0x0:+0x10000000"));
-	resp.push_back(Range<long long unsigned int>("0x20000000:+0xdfffffff"));
+	resp.push_back(AddrRange(0x0,0xFFFFFFF));
+	resp.push_back(AddrRange(0x20000000,0xFFFFFFFF));
 	return resp;
 }
 

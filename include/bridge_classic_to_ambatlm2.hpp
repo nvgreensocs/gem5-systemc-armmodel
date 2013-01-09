@@ -57,33 +57,54 @@ class BridgeClassicToAMBATLM2 : public SimpleMemory,
 
 
       public:
+        /**
+         * Constructor for the BridgeSlavePort.
+         */
         BridgeSlavePort(const std::string &_name, BridgeClassicToAMBATLM2 *_bridge)
          : SlavePort(_name, _bridge), bridge (_bridge)
          {
 		 };
+        /**
+         * Queue a response packet to be sent out later and also schedule
+         * a send if necessary.
+         *
+         * @param pkt a response to send out after a delay
+         * @param when tick when response packet should be sent
+         */
+        void schedTimingResp(PacketPtr pkt, Tick when) { std::cout << "UnImPlEmEnTeD " << std::endl; exit(-1); };
+
+        /**
+         * Retry any stalled request that we have failed to accept at
+         * an earlier point in time. This call will do nothing if no
+         * request is waiting.
+         */
+        void retryStalledReq()
+        {
+        	std::cout << "UnImPlEmEnTeD 2" << std::endl; exit(-1);
+            sendRetry();
+        }
 
       protected:
 
          /** When receiving a timing request from the peer port,
              pass it to the bridge. */
-         virtual bool recvTimingReq(PacketPtr pkt) { return bridge->recvTimingReq(pkt); };
+        bool recvTimingReq(PacketPtr pkt) { return bridge->recvTimingReq(pkt); };
 
         /** When receiving a retry request from the peer port,
             pass it to the bridge. */
-        virtual void recvRetry();
+        void recvRetry();
 
         /** When receiving a Atomic requestfrom the peer port,
             pass it to the bridge. */
-        virtual Tick recvAtomic(PacketPtr pkt);
+        Tick recvAtomic(PacketPtr pkt);
 
         /** When receiving a Functional request from the peer port,
             pass it to the bridge. */
-        virtual void recvFunctional(PacketPtr pkt) { bridge->recvFunctional(pkt); };
+        void recvFunctional(PacketPtr pkt) { bridge->recvFunctional(pkt); };
 
         /** When receiving a address range request the peer port,
             pass it to the bridge. */
-        virtual AddrRangeList getAddrRanges();
-
+        AddrRangeList getAddrRanges() const;
     };
 
 
@@ -154,7 +175,7 @@ class BridgeClassicToAMBATLM2 : public SimpleMemory,
 
     virtual void init();
     
-    virtual SlavePort& getSlavePort(const std::string& if_name, int idx = -1)
+    virtual BaseSlavePort& getSlavePort(const std::string& if_name, PortID idx = InvalidPortID)
     {
        if (if_name == "slave") {
             if (slavePort != NULL)
@@ -214,11 +235,13 @@ class BridgeClassicToAMBATLM2 : public SimpleMemory,
     std::queue<PacketPtr> retryQueue;
     sc_core::sc_fifo<uint32_t> writeDataQueue;
     sc_core::sc_event wenable_event;
-    sc_core::sc_event end_req;
     bool need_wenable_event;
     
     PacketPtr rd_packets[128];
     PacketPtr wr_packets[128];
+
+    gs::gs_param<bool>   _trace_transactions_cfg;
+    bool                 _trace_transactions;
 
 	std::queue<PacketPtr> dummy_pkt;
 

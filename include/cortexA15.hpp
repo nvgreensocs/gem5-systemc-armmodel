@@ -62,7 +62,8 @@ Description:
 #include "params/RealView.hh"
 #include "params/AmbaFake.hh"
 #include "params/Bridge.hh"
-#include "params/Bus.hh"
+#include "params/CoherentBus.hh"
+#include "params/NoncoherentBus.hh"
 #include "params/IsaFake.hh"
 #include "params/A9SCU.hh"
 #include "params/Gic.hh"
@@ -81,12 +82,25 @@ Description:
 
 #include <greencontrol/config.h>
 
-#include "sc_tlm_config_interface.h"
 #include "gem5_event_queue.hpp"
 #include "bridge_classic_to_ambatlm2.hpp"
 #include "nerios_arm_system.hpp"
 
 /*************** macros definition ***************/
+//waiting for a better place
+
+#define MANDATORY_GS_PARAM( type,str,val )      if (m_Api->existsParam(str)) \
+                                                                                                m_Api->getValue<type> (str,val); \
+                                                                                        else\
+                                                                                        {\
+                                                                                                std::cout << "ERROR: In " << name() << " missing parameter: " << str << std::endl;\
+                                                                                                sc_stop();return;\
+                                                                                        }
+
+#define OPTIONAL_GS_PARAM( type,str,val )       if (m_Api->existsParam(str)) \
+                                                                                                m_Api->getValue<type> (str,val);
+
+
 
 /*************** C types definition ***************/
 
@@ -116,12 +130,14 @@ private:
 	gs::gs_param<uint32_t>    _num_cores_cfg;
 	gs::gs_param<uint32_t>    _l2_cachesize_cfg;
 	gs::gs_param<uint32_t>    _cluster_id_cfg;
+	gs::gs_param<uint32_t>    _cpu_id_offset_cfg;
 	gs::gs_param<bool>        _gem5_uart_addr_cfg;
 	gs::gs_param<std::string> _system_cfg;
 	gs::gs_param<std::string> _linux_boot_loader_cfg;
 	gs::gs_param<std::string> _linux_kernel_cfg;
 	gs::gs_param<std::string> _linux_disk_image_cfg;
 	gs::gs_param<std::string> _cpt_dir_cfg;
+	gs::gs_param<std::string> _linux_readfile_cfg;
 	
 	sc_core::sc_time clk1;
 
@@ -134,7 +150,7 @@ private:
 	BaseCache * icache[MAX_CORES];
 	BaseCache * dcache[MAX_CORES];
 	BaseCache * xtb_walker_cache[MAX_CORES];
-	Bus * xtb_walker_cache_bus[MAX_CORES];
+	NoncoherentBus * xtb_walker_cache_bus[MAX_CORES];
 
 	sc_core::sc_event   switch_cpus_evt;
 
@@ -150,7 +166,7 @@ public:
 	//cpus database
 	static std::map<std::string,CortexA15*> CA15;
 	std::map<std::string,FullO3CPU<O3CPUImpl> *> cpus;
-	Nerios_config*   _current_request;
+//	Nerios_config*   _current_request;
 	uint32_t         _num_cores;
 	static uint32_t  _global_num_cores;
 	static bool      _mem_is_serialized;

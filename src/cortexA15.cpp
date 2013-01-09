@@ -59,7 +59,7 @@ namespace Debug {
 	extern SimpleFlag TerminalVerbose;
 	extern SimpleFlag BusAddrRanges;
 	extern SimpleFlag Bus;
-	extern SimpleFlag BusBridge;
+	extern SimpleFlag Bridge;
 	extern SimpleFlag Cache;
     extern SimpleFlag CachePort;
     extern SimpleFlag CacheRepl;
@@ -128,12 +128,14 @@ _debug_flags_cfg("debug_flags",""),
 _l2_cachesize_cfg("l2_cachesize_kB",4096),
 _num_cores_cfg("num_cores",1),
 _disable_listeners_flags_cfg("disable_listeners",false),
+_cpu_id_offset_cfg("cpu_id_offset",0),
 _cluster_id_cfg("cluster_id",0),
 _system_cfg("system_config","bareMetal"),
 _linux_boot_loader_cfg("linux_boot_loader","./scripts/binaries/boot.arm"),
 _linux_kernel_cfg("linux_kernel","./scripts/binaries/vmlinux.arm.smp.fb.2.6.38.8"),
 _linux_disk_image_cfg("linux_disk_image","./scripts/binaries/linux-arm-ael.img"),
 _cpt_dir_cfg("linux_checkpoint_dir","./scripts/binaries/cpt.56896248877000"),
+_linux_readfile_cfg("readfile",""),
 _gem5_uart_addr_cfg("gem5_uart_addr",false)
 {
 
@@ -242,9 +244,9 @@ void CortexA15::enable_debug(std::string debug_string)
 		{
 			(Debug::Bus).enable();
 		}
-		else if(debug_flags.at(i) == "BusBridge" )
+		else if(debug_flags.at(i) == "Bridge" )
 		{
-			(Debug::BusBridge).enable();
+			(Debug::Bridge).enable();
 		}
 		else if(debug_flags.at(i) == "Cache" )
 		{
@@ -419,6 +421,7 @@ void CortexA15::empty_requests()
 		{
 			cortexA15->threadContexts[i]->setIntReg(6, _global_num_cores);
 			cortexA15->threadContexts[i]->setIntReg(8, frq_mhz);
+			cortexA15->threadContexts[i]->setIntReg(9, _cpu_id_offset_cfg+i);
 		}
 		for (uint32_t i=0;i<objects.size();i++)
 			objects[i]->initState();
@@ -443,7 +446,7 @@ void CortexA15::before_end_of_elaboration()
 {
 	_num_cores=_num_cores_cfg;
 	_global_num_cores += _num_cores;
-	Range<long long unsigned int> rb("0x0:+0xFFFFFFFFFFFFFFFF");
+	AddrRange rb(0x0,0xFFFFFFFFFFFFFFFFULL);
 	
 	if (CA15.empty())
 	{
@@ -471,7 +474,7 @@ void CortexA15::before_end_of_elaboration()
     Pl050 * kmi1 = NULL;
     VncServer * vncserver = NULL;
 	
-	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
+	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
 	{
 		/*PhysicalMemoryParams* nvmParams = new PhysicalMemoryParams();
 		nvmParams->name=std::string(name())+".nvmem";
@@ -502,7 +505,6 @@ void CortexA15::before_end_of_elaboration()
 		sysParam->num_work_ids=16;
 		sysParam->atags_addr=256;
 //		sysParam->physmem=toACEbridge;
-		sysParam->readfile="";
 		sysParam->symbolfile="";
 		sysParam->work_begin_ckpt_count=0;
 		sysParam->work_begin_cpu_id_exit=-1;
@@ -511,6 +513,7 @@ void CortexA15::before_end_of_elaboration()
 		sysParam->work_end_ckpt_count=0;
 		sysParam->work_end_exit_count=0;
 		sysParam->work_item_id=-1;
+		sysParam->readfile=_linux_readfile_cfg;
 		linuxCortexA15 = sysParam->create();
 		
 		RawDiskImageParams* rawDiskImageParams = new RawDiskImageParams();
@@ -569,13 +572,14 @@ void CortexA15::before_end_of_elaboration()
 
 	BaseCacheParams * baseCacheParams = new BaseCacheParams();
 	baseCacheParams->name=std::string(name())+".iocache";
-	baseCacheParams->addr_ranges.push_back(Range<long long unsigned int>("0x0:+0xfffffff"));// Range<long long unsigned int>("0x0:+0x7ffffff"); Moving to 256MB linux RAM moves LCD frame buffer by 128MB to 0xF0000000
+	baseCacheParams->addr_ranges.push_back(AddrRange(0x0,0xfffffff));// AddrRange("0x0:+0x7ffffff"); Moving to 256MB linux RAM moves LCD frame buffer by 128MB to 0xF0000000
 	baseCacheParams->assoc = 8;
 	baseCacheParams->block_size = 64;
 	baseCacheParams->forward_snoops = false;
-	baseCacheParams->hash_delay = 1;
+	baseCacheParams->hash_delay = Cycles(1);
 	baseCacheParams->is_top_level = true;
-	baseCacheParams->latency = 10*clk1.value();//10000;
+	baseCacheParams->hit_latency = Cycles(10);//10000;
+	baseCacheParams->response_latency = Cycles(10);//10000;
 	baseCacheParams->max_miss_count = 0;
 	baseCacheParams->mshrs = 20;
 	baseCacheParams->prefetch_on_access = false;
@@ -584,7 +588,7 @@ void CortexA15::before_end_of_elaboration()
 	baseCacheParams->repl = NULL;
 	baseCacheParams->size = 1024;
 	baseCacheParams->subblock_size = 0;
-	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
+	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
 		baseCacheParams->system=linuxCortexA15;
 	else
 		baseCacheParams->system = cortexA15;
@@ -592,14 +596,13 @@ void CortexA15::before_end_of_elaboration()
 	baseCacheParams->trace_addr = 0;
 	baseCacheParams->two_queue = false;
 	baseCacheParams->write_buffers = 8;
+	baseCacheParams->clock  = clk1.value();
   	BaseCache * iocache = baseCacheParams->create();
   	objects.push_back((SimObject*)iocache);
 
 #ifdef USE_A15
 
   	BaseCache * l2;
-  	if (_system_cfg != "linux")
-  	{
   		StridePrefetcherParams* stridePrefetcherParams = new StridePrefetcherParams();
 		stridePrefetcherParams->name=std::string(name())+".l2.prefetcher";
 		stridePrefetcherParams->cross_pages=false;
@@ -608,8 +611,8 @@ void CortexA15::before_end_of_elaboration()
 		stridePrefetcherParams->serial_squash=false;
 		stridePrefetcherParams->size=100;
 		stridePrefetcherParams->use_master_id=true;
-		stridePrefetcherParams->latency = clk1.value();//1000;
-		if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
+	stridePrefetcherParams->latency = Cycles(1);//1000;
+	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
 			stridePrefetcherParams->sys=linuxCortexA15;
 		else
 			stridePrefetcherParams->sys = cortexA15;
@@ -631,49 +634,67 @@ void CortexA15::before_end_of_elaboration()
 		baseCacheParams->assoc = 8;
 		baseCacheParams->block_size = 64;
 		baseCacheParams->forward_snoops = true;
-		baseCacheParams->hash_delay = 1;
+	baseCacheParams->hash_delay = Cycles(1);
 		baseCacheParams->is_top_level = false;
 		uint32_t l2_cachesize = _l2_cachesize_cfg;
 		if (l2_cachesize <= 512)
 		{
 			if (_num_cores <= 2)
-				baseCacheParams->latency = 10*clk1.value();//14000;
-			else
-				baseCacheParams->latency = 12*clk1.value();//14000;
-		}
-		else if (l2_cachesize <= 2048)
 		{
-			if (_num_cores <= 2)
-				baseCacheParams->latency = 12*clk1.value();//14000;
-			else
-				baseCacheParams->latency = 14*clk1.value();//14000;
+			baseCacheParams->hit_latency = Cycles(10);
+			baseCacheParams->response_latency = Cycles(10);
 		}
 		else
 		{
-			if (_num_cores <= 2)
-				baseCacheParams->latency = 14*clk1.value();//14000;
-			else
-				baseCacheParams->latency = 16*clk1.value();//14000;
+			baseCacheParams->hit_latency = Cycles(12);//14000;
+			baseCacheParams->response_latency = Cycles(12);//14000;
 		}
-		baseCacheParams->max_miss_count = 0;
-		baseCacheParams->mshrs = 16;
-		baseCacheParams->prefetch_on_access = true;
-		baseCacheParams->prioritizeRequests = false;
-		baseCacheParams->repl = NULL;
-		baseCacheParams->size = _l2_cachesize_cfg*1024;
-		baseCacheParams->subblock_size = 0;
-		baseCacheParams->tgts_per_mshr = 8;
-		baseCacheParams->trace_addr = 0;
-		baseCacheParams->two_queue = false;
-		baseCacheParams->write_buffers = 8;
-		baseCacheParams->prefetcher=(BasePrefetcher*)l2_prefetcher;
-		if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
-			baseCacheParams->system=linuxCortexA15;
+	}
+	else if (l2_cachesize <= 2048)
+	{
+		if (_num_cores <= 2)
+		{
+			baseCacheParams->hit_latency = Cycles(12);//14000;
+			baseCacheParams->response_latency = Cycles(12);//14000;
+		}
 		else
-			baseCacheParams->system = cortexA15;
-		l2 = baseCacheParams->create();
-		objects.push_back((SimObject*)l2);
-  	}
+		{
+			baseCacheParams->hit_latency = Cycles(14);//14000;
+			baseCacheParams->response_latency = Cycles(14);//14000;
+		}
+	}
+	else
+	{
+		if (_num_cores <= 2)
+		{
+			baseCacheParams->hit_latency = Cycles(14);//14000;
+			baseCacheParams->response_latency = Cycles(14);//14000;
+		}
+		else
+		{
+			baseCacheParams->hit_latency = Cycles(16);//14000;
+			baseCacheParams->response_latency = Cycles(16);//14000;
+		}
+	}
+	baseCacheParams->max_miss_count = 0;
+	baseCacheParams->mshrs = 16;
+	baseCacheParams->prefetch_on_access = true;
+	baseCacheParams->prioritizeRequests = false;
+	baseCacheParams->repl = NULL;
+	baseCacheParams->size = _l2_cachesize_cfg*1024;
+	baseCacheParams->subblock_size = 0;
+	baseCacheParams->tgts_per_mshr = 8;
+	baseCacheParams->trace_addr = 0;
+	baseCacheParams->two_queue = false;
+	baseCacheParams->write_buffers = 8;
+	baseCacheParams->prefetcher=(BasePrefetcher*)l2_prefetcher;
+	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore")  || (_system_cfg == "linuxCAboot"))
+		baseCacheParams->system=linuxCortexA15;
+	else
+		baseCacheParams->system = cortexA15;
+	baseCacheParams->clock = clk1.value();
+	l2 = baseCacheParams->create();
+	objects.push_back((SimObject*)l2);
 
 #else
 
@@ -682,9 +703,10 @@ void CortexA15::before_end_of_elaboration()
 	baseCacheParams->write_buffers = 8;
 	baseCacheParams->is_top_level = false;
 	baseCacheParams->block_size = 64;
-	baseCacheParams->prefetch_latency = 100*clk1.value();//1000;
+	baseCacheParams->prefetch_latency = 100;//1000;
 	baseCacheParams->size = _l2_cachesize_cfg*1024;
-	baseCacheParams->latency = 16*clk1.value();//14000;
+	baseCacheParams->hit_latency = Cycles(16);//14000;
+	baseCacheParams->response_latency = Cycles(16);//14000;
 	baseCacheParams->addr_ranges.push_back(rb);
 	baseCacheParams->num_cpus = _num_cores;
 	baseCacheParams->trace_addr = 0;
@@ -696,18 +718,19 @@ void CortexA15::before_end_of_elaboration()
 	baseCacheParams->assoc = 8;
 	baseCacheParams->prefetcher = NULL;
 	baseCacheParams->prioritizeRequests = false;
-	baseCacheParams->hash_delay = 1;
+	baseCacheParams->hash_delay = Cycles(1);
 	baseCacheParams->subblock_size = 0;
 	baseCacheParams->prefetcher_size = 100;
 	baseCacheParams->two_queue = false;
-  	BaseCache * l2 = baseCacheParams->create();
+	baseCacheParams->clock  = clk1.value();
+	BaseCache * l2 = baseCacheParams->create();
   	objects.push_back((SimObject*)l2);
 
 #endif
 
 	IntrControlParams * intCtrlParams = new IntrControlParams();
 	intCtrlParams->name=std::string(name())+".intrctrl";
-	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
+	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
 		intCtrlParams->sys=linuxCortexA15;
 	else
 		intCtrlParams->sys=cortexA15;
@@ -720,73 +743,65 @@ void CortexA15::before_end_of_elaboration()
 	rvParams->mem_start_addr=0;
     rvParams->intrctrl = intc;
     rvParams->pci_cfg_base = 0;
-	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
+	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
 		rvParams->system=linuxCortexA15;
 	else
 		rvParams->system = cortexA15;
  	RealView * rv = rvParams->create();
  	objects.push_back((SimObject*)rv);
 
-	BusParams * busParams = new BusParams();
+ 	CoherentBusParams * busParams = new CoherentBusParams();
+ 	NoncoherentBusParams * ncbusParams = new NoncoherentBusParams();
 	busParams->name=std::string(name())+".membus";
 	busParams->clock = clk1.value();//1000;
-  	busParams->header_cycles = 1;
+  	busParams->header_cycles = Cycles(1);
   	busParams->width = 64; // bytes //TODO: move to 16!!!
   	busParams->use_default_range = false;
   	busParams->block_size = 64;
-  	busParams->bus_id = 1;// unused?
   	busParams->port_master_connection_count=6;
-  	if (_system_cfg == "linux")
-  		busParams->port_slave_connection_count=4*_num_cores+1;
-  	else
-  		busParams->port_slave_connection_count=2;
+	busParams->port_slave_connection_count=2;
   	busParams->port_default_connection_count=1;
-  	Bus * membus = busParams->create();
+  	CoherentBus * membus = busParams->create();
 	objects.push_back((SimObject*)membus);
 
-    busParams = new BusParams();
-	busParams->name=std::string(name())+".iobus";
-	busParams->clock = clk1.value();//1000;
-  	busParams->header_cycles = 1;
-  	busParams->width = 64;// bytes
-  	busParams->use_default_range = false;
-  	busParams->block_size = 64;
-  	busParams->bus_id = 0; // unused?
-	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
+	ncbusParams = new NoncoherentBusParams();
+	ncbusParams->name=std::string(name())+".iobus";
+	ncbusParams->clock = clk1.value();//1000;
+  	ncbusParams->header_cycles = Cycles(1);
+  	ncbusParams->width = 64;// bytes
+  	ncbusParams->use_default_range = false;
+  	ncbusParams->block_size = 64;
+	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
 	{
-		busParams->port_master_connection_count=26;
-	  	busParams->port_slave_connection_count=3;
+		ncbusParams->port_master_connection_count=21+4; // force 4 uarts for linux
+	  	ncbusParams->port_slave_connection_count=3;
 	}
 	else
 	{
-		busParams->port_master_connection_count=22;
-	  	busParams->port_slave_connection_count=2;
+		ncbusParams->port_master_connection_count=18+_num_cores;
+	  	ncbusParams->port_slave_connection_count=2;
 	}
-  	busParams->port_default_connection_count=0;
-  	Bus * iobus = busParams->create();
+  	ncbusParams->port_default_connection_count=0;
+  	NoncoherentBus * iobus = ncbusParams->create();
 	objects.push_back((SimObject*)iobus);
 	
-	Bus * tol2bus;
-	if (_system_cfg != "linux")
-	{
-		busParams = new BusParams();
-		busParams->name=std::string(name())+".tol2bus";
-		busParams->clock = clk1.value();//1000;
-		busParams->header_cycles = 1;
-		busParams->width = 64; // bytes
-		busParams->use_default_range = false;
-		busParams->block_size = 64;
-		busParams->bus_id = 0;// unused?
-		busParams->port_master_connection_count=1;
-		busParams->port_slave_connection_count=3*_num_cores;
-		busParams->port_default_connection_count=0;
-		tol2bus = busParams->create();
-		objects.push_back((SimObject*)tol2bus);
-	}
+	CoherentBus * tol2bus;
+	busParams = new CoherentBusParams();
+	busParams->name=std::string(name())+".tol2bus";
+	busParams->clock = clk1.value();//1000;
+	busParams->header_cycles = Cycles(1);
+	busParams->width = 64; // bytes
+	busParams->use_default_range = false;
+	busParams->block_size = 64;
+	busParams->port_master_connection_count=1;
+	busParams->port_slave_connection_count=3*_num_cores;
+	busParams->port_default_connection_count=0;
+	tol2bus = busParams->create();
+	objects.push_back((SimObject*)tol2bus);
 	
 	IsaFakeParams * isafkParams = new IsaFakeParams();
 	isafkParams->name=std::string(name())+".membus.badaddr_responder";
-	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
+	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
 		isafkParams->system=linuxCortexA15;
 	else
 		isafkParams->system=cortexA15;
@@ -845,7 +860,7 @@ void CortexA15::before_end_of_elaboration()
 
 	isafkParams = new IsaFakeParams();
 	isafkParams->name=std::string(name())+".realview.l2x0_fake";
-	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
+	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
 		isafkParams->system=linuxCortexA15;
 	else
 		isafkParams->system=cortexA15;
@@ -865,19 +880,18 @@ void CortexA15::before_end_of_elaboration()
 	
 	BridgeParams * bridgeParams = new BridgeParams();
 	bridgeParams->name=std::string(name())+".bridge";
-	bridgeParams->write_ack = false;
   	bridgeParams->resp_size = 16;
-  	Range<long long unsigned int> rb1("0x10000000:+0xEFFFFFF");
+  	AddrRange rb1(0x10000000,0x1EFFFFFF);
   	bridgeParams->ranges.push_back(rb1);
   	bridgeParams->delay = 50*clk1.value();//50000;
+  	bridgeParams->clock = clk1.value();
   	bridgeParams->req_size = 16;
-  	bridgeParams->nack_delay = 4*clk1.value();//4000;
 	Bridge * bridge = bridgeParams->create();
 	objects.push_back((SimObject*)bridge);
 	
 	A9SCUParams * a9scuParams = new A9SCUParams();
 	a9scuParams->name=std::string(name())+".realview.a9scu";
-	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
+	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
 		a9scuParams->system=linuxCortexA15;
 	else
 		a9scuParams->system = cortexA15;
@@ -888,7 +902,7 @@ void CortexA15::before_end_of_elaboration()
 	
 	AmbaFakeParams * ambaFakeParams = new AmbaFakeParams();
 	ambaFakeParams->name=std::string(name())+".realview.mmc_fake";
-	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
+	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
 		ambaFakeParams->system=linuxCortexA15;
 	else
 		ambaFakeParams->system = cortexA15;
@@ -902,7 +916,7 @@ void CortexA15::before_end_of_elaboration()
 	ambaFakeParams = new AmbaFakeParams();
 	ambaFakeParams->name=std::string(name())+".realview.watchdog_fake";
 
-	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
+	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
 		ambaFakeParams->system=linuxCortexA15;
 	else
 		ambaFakeParams->system = cortexA15;
@@ -916,7 +930,7 @@ void CortexA15::before_end_of_elaboration()
 	ambaFakeParams = new AmbaFakeParams();
 	ambaFakeParams->name=std::string(name())+".realview.gpio0_fake";
 
-	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
+	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
 		ambaFakeParams->system=linuxCortexA15;
 	else
 		ambaFakeParams->system = cortexA15;
@@ -930,7 +944,7 @@ void CortexA15::before_end_of_elaboration()
 	ambaFakeParams = new AmbaFakeParams();
 	ambaFakeParams->name=std::string(name())+".realview.gpio1_fake";
 
-	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
+	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
 		ambaFakeParams->system=linuxCortexA15;
 	else
 		ambaFakeParams->system = cortexA15;
@@ -944,7 +958,7 @@ void CortexA15::before_end_of_elaboration()
 	ambaFakeParams = new AmbaFakeParams();
 	ambaFakeParams->name=std::string(name())+".realview.gpio2_fake";
 
-	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
+	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
 		ambaFakeParams->system=linuxCortexA15;
 	else
 		ambaFakeParams->system = cortexA15;
@@ -958,7 +972,7 @@ void CortexA15::before_end_of_elaboration()
 	ambaFakeParams = new AmbaFakeParams();
 	ambaFakeParams->name=std::string(name())+".realview.dmac_fake";
 
-	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
+	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
 		ambaFakeParams->system=linuxCortexA15;
 	else
 		ambaFakeParams->system = cortexA15;
@@ -972,7 +986,7 @@ void CortexA15::before_end_of_elaboration()
 	ambaFakeParams = new AmbaFakeParams();
 	ambaFakeParams->name=std::string(name())+".realview.aaci_fake";
 
-	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
+	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
 		ambaFakeParams->system=linuxCortexA15;
 	else
 		ambaFakeParams->system = cortexA15;
@@ -986,7 +1000,7 @@ void CortexA15::before_end_of_elaboration()
 	ambaFakeParams = new AmbaFakeParams();
 	ambaFakeParams->name=std::string(name())+".realview.ssp_fake";
 
-	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
+	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
 		ambaFakeParams->system=linuxCortexA15;
 	else
 		ambaFakeParams->system = cortexA15;
@@ -998,9 +1012,9 @@ void CortexA15::before_end_of_elaboration()
 	objects.push_back((SimObject*)ssp_fake);
 	
 	ambaFakeParams = new AmbaFakeParams();
-	ambaFakeParams->name=std::string(name())+".realview.rtc_fake";
+	ambaFakeParams->name=std::string(name())+".realview.rtc";
 
-	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
+	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
 		ambaFakeParams->system=linuxCortexA15;
 	else
 		ambaFakeParams->system = cortexA15;
@@ -1014,7 +1028,7 @@ void CortexA15::before_end_of_elaboration()
 	ambaFakeParams = new AmbaFakeParams();
 	ambaFakeParams->name=std::string(name())+".realview.smc_fake";
 
-	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
+	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
 		ambaFakeParams->system=linuxCortexA15;
 	else
 		ambaFakeParams->system = cortexA15;
@@ -1028,7 +1042,7 @@ void CortexA15::before_end_of_elaboration()
 	ambaFakeParams = new AmbaFakeParams();
 	ambaFakeParams->name=std::string(name())+".realview.sp810_fake";
 
-	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
+	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
 		ambaFakeParams->system=linuxCortexA15;
 	else
 		ambaFakeParams->system = cortexA15;
@@ -1042,7 +1056,7 @@ void CortexA15::before_end_of_elaboration()
 	ambaFakeParams = new AmbaFakeParams();
 	ambaFakeParams->name=std::string(name())+".realview.sci_fake";
 
-	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
+	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
 		ambaFakeParams->system=linuxCortexA15;
 	else
 		ambaFakeParams->system = cortexA15;
@@ -1056,7 +1070,7 @@ void CortexA15::before_end_of_elaboration()
 	GicParams * gicParams = new GicParams();
 	gicParams->name=std::string(name())+".realview.gic";
 	gicParams->platform=(Platform*)rv;
-	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
+	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
 		gicParams->system=linuxCortexA15;
 	else
 		gicParams->system = cortexA15;
@@ -1071,7 +1085,7 @@ void CortexA15::before_end_of_elaboration()
 	
 	CpuLocalTimerParams * cpuLocalTimerParams = new CpuLocalTimerParams();
 	cpuLocalTimerParams->name=std::string(name())+".realview.local_cpu_timer";
-	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
+	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
 		cpuLocalTimerParams->system=linuxCortexA15;
 	else
 		cpuLocalTimerParams->system = cortexA15;
@@ -1087,15 +1101,13 @@ void CortexA15::before_end_of_elaboration()
 	IdeControllerParams * ideControllerParams = new IdeControllerParams();
 	ideControllerParams->name=std::string(name())+".realview.cf_ctrl";
 	ideControllerParams->platform=(Platform*)rv;
-	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
+	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
 	{
 		ideControllerParams->system=linuxCortexA15;
 		ideControllerParams->disks.push_back(ideDisk);
 	}
 	else
 		ideControllerParams->system = cortexA15;
-	ideControllerParams->min_backoff_delay = 4*clk1.value();//4000;
-	ideControllerParams->max_backoff_delay = 10000*clk1.value();//10000000;
     ideControllerParams->VendorID = 32902, 
     ideControllerParams->InterruptPin = 1;
     ideControllerParams->HeaderType = 0;
@@ -1146,7 +1158,7 @@ void CortexA15::before_end_of_elaboration()
 
 	Sp804Params * sp804Params = new Sp804Params();
 	sp804Params->name=std::string(name())+".realview.timer1";
-	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
+	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
 		sp804Params->system=linuxCortexA15;
 	else
 		sp804Params->system = cortexA15;
@@ -1163,7 +1175,7 @@ void CortexA15::before_end_of_elaboration()
 
 	sp804Params = new Sp804Params();
 	sp804Params->name=std::string(name())+".realview.timer0";
-	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
+	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
 		sp804Params->system=linuxCortexA15;
 	else
 		sp804Params->system = cortexA15;
@@ -1178,7 +1190,7 @@ void CortexA15::before_end_of_elaboration()
 	Sp804 * timer0 = sp804Params->create();
 	objects.push_back((SimObject*)timer0);
 	
-	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
+	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
 	{
 		VncServerParams * vncServerParams = new VncServerParams();
 		vncServerParams->name=std::string(name())+".vncserver";
@@ -1197,7 +1209,7 @@ void CortexA15::before_end_of_elaboration()
 		pl050Params->gic = gic;
 		pl050Params->int_delay = 1000*clk1.value();//1000000;
 		pl050Params->is_mouse = true;
-		pl050Params->vnc = vncserver;
+		pl050Params->vnc = (VncInput*) vncserver;
 		kmi1 = pl050Params->create();
 		objects.push_back((SimObject*)kmi1);
 
@@ -1211,21 +1223,19 @@ void CortexA15::before_end_of_elaboration()
 		pl050Params->gic = gic;
 		pl050Params->int_delay = 1000*clk1.value();//1000000;
 		pl050Params->is_mouse = false;
-		pl050Params->vnc = vncserver;
+		pl050Params->vnc = (VncInput*)vncserver;
 		kmi0 = pl050Params->create();
 		objects.push_back((SimObject*)kmi0);
 
 		Pl111Params * pl111Params = new Pl111Params();
 		pl111Params->name=std::string(name())+".realview.clcd";
 		pl111Params->system = linuxCortexA15;
-		pl111Params->min_backoff_delay = 4*clk1.value();//4000;
-		pl111Params->max_backoff_delay = 10000*clk1.value();//10000000;
 		pl111Params->int_num = 55;
 		pl111Params->pio_addr = 0x10020000;
 		pl111Params->pio_latency = 10*clk1.value();//10000;
 		pl111Params->amba_id = 1315089,
 		pl111Params->gic = gic;
-		pl111Params->vnc = vncserver;
+		pl111Params->vnc = (VncInput*)vncserver;
 		pl111Params->clock = 41667;
 		clcd = pl111Params->create();
 		objects.push_back((SimObject*)clcd);
@@ -1233,7 +1243,7 @@ void CortexA15::before_end_of_elaboration()
 	
 	RealViewCtrlParams * realViewCtrlParams = new RealViewCtrlParams();
 	realViewCtrlParams->name=std::string(name())+".realview.realview_io";
-	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
+	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
 		realViewCtrlParams->system=linuxCortexA15;
 	else
 		realViewCtrlParams->system = cortexA15;
@@ -1247,7 +1257,7 @@ void CortexA15::before_end_of_elaboration()
 	
 	objects.push_back((SimObject*)toACEbridge);
 	
-	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
+	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
 		connectPorts((SimObject*)linuxCortexA15,"system_port",1,(SimObject*)toACEbridge,"func",1);
 	else
 		connectPorts((SimObject*)cortexA15,"system_port",1,(SimObject*)toACEbridge,"func",1);
@@ -1293,6 +1303,90 @@ void CortexA15::before_end_of_elaboration()
 #endif
 	FUPool * fuPool[MAX_CORES];
 	
+	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
+	{
+
+		for (uint32_t n=0;n<4;n++) // always 4 uarts for linux
+		{
+			// core number
+			std::stringstream ss;
+			ss.str("");
+			ss << n;
+			// Terminals
+
+			termParams = new TerminalParams();
+			if (n == 0)
+				termParams->name=std::string(name())+".terminal";
+			else
+				termParams->name=std::string(name())+".terminal_"+ss.str();
+			termParams->port = 3456+n;
+	    	termParams->intr_control = intc;
+	    	termParams->number = n;
+	    	termParams->output = true;
+	    	term[n] = termParams->create();
+	    	objects.push_back((SimObject*)term[n]);
+
+	    	// Uart
+			pl011Params = new Pl011Params();
+			if (n == 0)
+				pl011Params->name=std::string(name())+".realview.uart";
+			else
+				pl011Params->name=std::string(name())+".realview.uart"+ss.str();
+			pl011Params->platform=(Platform*)rv;
+			pl011Params->system=linuxCortexA15;
+			if (_gem5_uart_addr_cfg)
+				pl011Params->pio_addr = 0x10009000+(n+_cpu_id_offset_cfg)*0x1000;
+			else
+				pl011Params->pio_addr = UART_BADDR+(n+_cpu_id_offset_cfg)*0x100000;//0x10009000+n*0x1000;
+			pl011Params->pio_latency = clk1.value();//1000;
+			pl011Params->terminal = term[n];
+			pl011Params->int_num = 44+n;
+			pl011Params->gic = gic;
+			pl011Params->end_on_eot = true;
+			pl011Params->int_delay = 100*clk1.value();//100000;
+			uart[n] = pl011Params->create();
+			objects.push_back((SimObject*)uart[n]);
+		}
+	}
+	else
+	{
+		for (uint32_t n=0;n<_num_cores;n++)
+		{
+			// core number
+			std::stringstream ss;
+			ss.str("");
+			if (_num_cores > 1)
+				ss << n;
+			// Terminals
+
+			termParams = new TerminalParams();
+			termParams->name=std::string(name())+".terminal_"+ss.str();
+			termParams->port = 3456+n;
+	    	termParams->intr_control = intc;
+	    	termParams->number = n;
+	    	termParams->output = true;
+	    	term[n] = termParams->create();
+	    	objects.push_back((SimObject*)term[n]);
+			// Uart
+			pl011Params = new Pl011Params();
+			pl011Params->name=std::string(name())+".realview.uart"+ss.str();
+			pl011Params->platform=(Platform*)rv;
+			pl011Params->system = cortexA15;
+			if (_gem5_uart_addr_cfg)
+				pl011Params->pio_addr = 0x10009000+(n+_cpu_id_offset_cfg)*0x1000;
+			else
+				pl011Params->pio_addr = UART_BADDR+(n+_cpu_id_offset_cfg)*0x100000;//0x10009000+n*0x1000;
+			pl011Params->pio_latency = clk1.value();//1000;
+			pl011Params->terminal = term[n];
+			pl011Params->int_num = 44+n;
+			pl011Params->gic = gic;
+			pl011Params->end_on_eot = true;
+			pl011Params->int_delay = 100*clk1.value();//100000;
+			uart[n] = pl011Params->create();
+			objects.push_back((SimObject*)uart[n]);
+		}
+	}
+
 	for (uint32_t n=0;n<_num_cores;n++)
 	{
 		// core number
@@ -1300,129 +1394,88 @@ void CortexA15::before_end_of_elaboration()
 		ss.str("");
 		if (_num_cores > 1)
 			ss << n;
-		
-		// Terminals
-	
-		termParams = new TerminalParams();
-		if ((_system_cfg == "linuxRestore") && (n == 0))
-			termParams->name=std::string(name())+".terminal";
-		else if (n == 0)
-			termParams->name=std::string(name())+".terminal_0";
-		else
-			termParams->name=std::string(name())+".terminal_"+ss.str();
-		termParams->port = 3456+n;
-    	termParams->intr_control = intc;
-    	termParams->number = n;
-    	termParams->output = true;
-    	term[n] = termParams->create();
-    	objects.push_back((SimObject*)term[n]);
+
     	
-    	// Uart
-		    	
-		pl011Params = new Pl011Params();
-		if ((_system_cfg == "linuxRestore") && (n == 0))
-			pl011Params->name=std::string(name())+".realview.uart";
-		else
-			pl011Params->name=std::string(name())+".realview.uart"+ss.str();
-		pl011Params->platform=(Platform*)rv;
-		if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
-			pl011Params->system=linuxCortexA15;
-		else
-			pl011Params->system = cortexA15;
-		if (_gem5_uart_addr_cfg)
-			pl011Params->pio_addr = 0x10009000+n*0x1000;
-		else
-			pl011Params->pio_addr = UART_BADDR+n*0x100000;//0x10009000+n*0x1000;
-		pl011Params->pio_latency = clk1.value();//1000;
-		pl011Params->terminal = term[n];
-		pl011Params->int_num = 44+n;
-		pl011Params->gic = gic;
-		pl011Params->end_on_eot = true;
-		pl011Params->int_delay = 100*clk1.value();//100000;
-		uart[n] = pl011Params->create();
-		objects.push_back((SimObject*)uart[n]);
-		
 		// TLBs
-		if (_system_cfg != "linux")
-		{
-			tableWalkerParams = new ArmTableWalkerParams();
-			if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
-				tableWalkerParams->name=std::string(name())+".cpu"+ss.str()+".dtb.walker_";
-			else
-				tableWalkerParams->name=std::string(name())+".cpu"+ss.str()+".dtb.walker";
-			tableWalkerParams->max_backoff = 100000;
-			if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
-				tableWalkerParams->sys=linuxCortexA15;
-			else
-				tableWalkerParams->sys = cortexA15;
-			tableWalkerParams->min_backoff = 0;
-			tableWalkerParams->port_port_connection_count=1;
-			dtb_walker[n] = tableWalkerParams->create();
-			objects.push_back((SimObject*)dtb_walker[n]);
+		tableWalkerParams = new ArmTableWalkerParams();
+		if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
+			tableWalkerParams->name=std::string(name())+".cpu"+ss.str()+".dtb.walker_";
+		else
+			tableWalkerParams->name=std::string(name())+".cpu"+ss.str()+".dtb.walker";
+		if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
+			tableWalkerParams->sys=linuxCortexA15;
+		else
+			tableWalkerParams->sys = cortexA15;
+		tableWalkerParams->num_squash_per_cycle=2;
+		tableWalkerParams->clock=clk1.value();
+		tableWalkerParams->port_port_connection_count=1;
+		dtb_walker[n] = tableWalkerParams->create();
+		objects.push_back((SimObject*)dtb_walker[n]);
 
-			tlbParams = new ArmTLBParams();
-			if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
-				tlbParams->name=std::string(name())+".cpu"+ss.str()+".dtb_";
-			else
-				tlbParams->name=std::string(name())+".cpu"+ss.str()+".dtb";
-			tlbParams->size=64; // 32 read + 32 write
-			tlbParams->walker=dtb_walker[n];
-			dtlb[n] = tlbParams->create();
-			objects.push_back((SimObject*)dtlb[n]);
+		tlbParams = new ArmTLBParams();
+		if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
+			tlbParams->name=std::string(name())+".cpu"+ss.str()+".dtb_";
+		else
+			tlbParams->name=std::string(name())+".cpu"+ss.str()+".dtb";
+		tlbParams->size=64; // 32 load + 32 store
+		tlbParams->walker=dtb_walker[n];
+		dtlb[n] = tlbParams->create();
+		objects.push_back((SimObject*)dtlb[n]);
 
-			tableWalkerParams = new ArmTableWalkerParams();
-			if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
-				tableWalkerParams->name=std::string(name())+".cpu"+ss.str()+".itb.walker_";
-			else
-				tableWalkerParams->name=std::string(name())+".cpu"+ss.str()+".itb.walker";
-			tableWalkerParams->max_backoff = 100000;
-			if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
-				tableWalkerParams->sys=linuxCortexA15;
-			else
-				tableWalkerParams->sys = cortexA15;
-			tableWalkerParams->min_backoff = 0;
-			tableWalkerParams->port_port_connection_count=1;
-			itb_walker[n] = tableWalkerParams->create();
-			objects.push_back((SimObject*)itb_walker[n]);
+		tableWalkerParams = new ArmTableWalkerParams();
+		if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
+			tableWalkerParams->name=std::string(name())+".cpu"+ss.str()+".itb.walker_";
+		else
+			tableWalkerParams->name=std::string(name())+".cpu"+ss.str()+".itb.walker";
+		if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
+			tableWalkerParams->sys=linuxCortexA15;
+		else
+			tableWalkerParams->sys = cortexA15;
+		tableWalkerParams->num_squash_per_cycle=2;
+		tableWalkerParams->clock=clk1.value();
+		tableWalkerParams->port_port_connection_count=1;
+		itb_walker[n] = tableWalkerParams->create();
+		objects.push_back((SimObject*)itb_walker[n]);
 
-			tlbParams = new ArmTLBParams();
-			if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
-				tlbParams->name=std::string(name())+".cpu"+ss.str()+".itb_";
-			else
-				tlbParams->name=std::string(name())+".cpu"+ss.str()+".itb";
-			tlbParams->size=32;
-			tlbParams->walker=itb_walker[n];
-			itlb[n] = tlbParams->create();
-			objects.push_back((SimObject*)itlb[n]);
+		tlbParams = new ArmTLBParams();
+		if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
+			tlbParams->name=std::string(name())+".cpu"+ss.str()+".itb_";
+		else
+			tlbParams->name=std::string(name())+".cpu"+ss.str()+".itb";
+		tlbParams->size=32;
+		tlbParams->walker=itb_walker[n];
+		itlb[n] = tlbParams->create();
+		objects.push_back((SimObject*)itlb[n]);
 
-			baseCacheParams = new BaseCacheParams();
-			baseCacheParams->name=std::string(name())+".cpu"+ss.str()+".xtb_walker_cache";
-			baseCacheParams->addr_ranges.push_back(rb);
-			baseCacheParams->assoc = 4;
-			baseCacheParams->block_size = 64;
-			baseCacheParams->forward_snoops = false;
-			baseCacheParams->hash_delay = 1;
-			baseCacheParams->is_top_level = true;
-			baseCacheParams->latency = 4*clk1.value();//4000;
-			baseCacheParams->max_miss_count = 0;
-			baseCacheParams->mshrs = 6;
-			baseCacheParams->prefetch_on_access = false;
-			baseCacheParams->prefetcher = NULL;
-			baseCacheParams->prioritizeRequests = false;
-			baseCacheParams->repl = NULL;
-			baseCacheParams->size = 8*1024; // 512 entries, 4 ways, 32bit descriptors
-			baseCacheParams->subblock_size = 0;
-			if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
-				baseCacheParams->system=linuxCortexA15;
-			else
-				baseCacheParams->system = cortexA15;
-			baseCacheParams->tgts_per_mshr = 8;
-			baseCacheParams->trace_addr = 0;
-			baseCacheParams->two_queue = false;
-			baseCacheParams->write_buffers = 16; // ????
-			xtb_walker_cache[n] = baseCacheParams->create();
-			objects.push_back((SimObject*)xtb_walker_cache[n]);
-		}
+		baseCacheParams = new BaseCacheParams();
+		baseCacheParams->name=std::string(name())+".cpu"+ss.str()+".xtb_walker_cache";
+		baseCacheParams->addr_ranges.push_back(rb);
+		baseCacheParams->assoc = 4;
+		baseCacheParams->block_size = 64;
+		baseCacheParams->forward_snoops = false;
+		baseCacheParams->hash_delay = Cycles(1);
+		baseCacheParams->is_top_level = true;
+		baseCacheParams->hit_latency = Cycles(4);//4000;
+		baseCacheParams->response_latency = Cycles(4);//4000;
+		baseCacheParams->max_miss_count = 0;
+		baseCacheParams->mshrs = 6;
+		baseCacheParams->prefetch_on_access = false;
+		baseCacheParams->prefetcher = NULL;
+		baseCacheParams->prioritizeRequests = false;
+		baseCacheParams->repl = NULL;
+		baseCacheParams->size = 8*1024; // 512 entries, 4 ways, 32bit descriptors
+		baseCacheParams->subblock_size = 0;
+		if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
+			baseCacheParams->system=linuxCortexA15;
+		else
+			baseCacheParams->system = cortexA15;
+		baseCacheParams->tgts_per_mshr = 8;
+		baseCacheParams->trace_addr = 0;
+		baseCacheParams->two_queue = false;
+		baseCacheParams->write_buffers = 16; // ????
+		baseCacheParams->clock  = clk1.value();
+		xtb_walker_cache[n] = baseCacheParams->create();
+		objects.push_back((SimObject*)xtb_walker_cache[n]);
 		
 		// tracer
 		
@@ -1445,8 +1498,8 @@ void CortexA15::before_end_of_elaboration()
 
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList0.opList";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 2; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(2);
 		opdescParams->opClass = Enums::MemRead;
 		FUDescParams* fudescParams = new FUDescParams();
 		fudescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList0";
@@ -1459,8 +1512,8 @@ void CortexA15::before_end_of_elaboration()
 
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList1.opList";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 2; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(2);
 		opdescParams->opClass = Enums::MemWrite;
 		fudescParams = new FUDescParams();
 		fudescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList1";
@@ -1478,208 +1531,208 @@ void CortexA15::before_end_of_elaboration()
 		fudescParams->opList.clear();
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList2.opList00";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 4; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(4);
 		opdescParams->opClass = Enums::SimdAdd;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList2.opList01";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 4; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(4);
 		opdescParams->opClass = Enums::SimdAddAcc;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList2.opList02";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 4; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(4);
 		opdescParams->opClass = Enums::SimdAlu;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList2.opList03";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 4; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(4);
 		opdescParams->opClass = Enums::SimdCmp;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList2.opList04";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 3; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(3);
 		opdescParams->opClass = Enums::SimdCvt;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList2.opList05";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 3; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(3);
 		opdescParams->opClass = Enums::SimdMisc;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList2.opList06";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 5; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(5);
 		opdescParams->opClass = Enums::SimdMult;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList2.opList07";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 5; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(5);
 		opdescParams->opClass = Enums::SimdMultAcc;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList2.opList08";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 3; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(3);
 		opdescParams->opClass = Enums::SimdShift;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList2.opList09";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 3; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(3);
 		opdescParams->opClass = Enums::SimdShiftAcc;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList2.opList10";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 9; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(9);
 		opdescParams->opClass = Enums::SimdSqrt;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList2.opList11";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 5; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(5);
 		opdescParams->opClass = Enums::SimdFloatAdd;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList2.opList12";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 5; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(5);
 		opdescParams->opClass = Enums::SimdFloatAlu;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList2.opList13";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 3; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(3);
 		opdescParams->opClass = Enums::SimdFloatCmp;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList2.opList14";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 3; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(3);
 		opdescParams->opClass = Enums::SimdFloatCvt;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList2.opList15";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 3; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(3);
 		opdescParams->opClass = Enums::SimdFloatDiv;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList2.opList16";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 3; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(3);
 		opdescParams->opClass = Enums::SimdFloatMisc;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList2.opList17";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 3; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(3);
 		opdescParams->opClass = Enums::SimdFloatMult;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList2.opList18";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 1; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(1);
 		opdescParams->opClass = Enums::SimdFloatMultAcc;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList2.opList19";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 9; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(9);
 		opdescParams->opClass = Enums::SimdFloatSqrt;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList2.opList20";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 5; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(5);
 		opdescParams->opClass = Enums::FloatAdd;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList2.opList21";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 5; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(5);
 		opdescParams->opClass = Enums::FloatCmp;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList2.opList22";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 5; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(5);
 		opdescParams->opClass = Enums::FloatCvt;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList2.opList23";
-		opdescParams->issueLat = 9;
-		opdescParams->opLat = 9; 
+		opdescParams->issueLat = Cycles(9);
+		opdescParams->opLat = Cycles(9);
 		opdescParams->opClass = Enums::FloatDiv;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList2.opList24";
-		opdescParams->issueLat = 33;
-		opdescParams->opLat = 33; 
+		opdescParams->issueLat = Cycles(33);
+		opdescParams->opLat = Cycles(33);
 		opdescParams->opClass = Enums::FloatSqrt;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList2.opList25";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 4; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(4);
 		opdescParams->opClass = Enums::FloatMult;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
@@ -1693,24 +1746,24 @@ void CortexA15::before_end_of_elaboration()
 		fudescParams->opList.clear();
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList3.opList0";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 3; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(3);
 		opdescParams->opClass = Enums::IntMult;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList3.opList1";
-		opdescParams->issueLat = 12;
-		opdescParams->opLat = 12; 
+		opdescParams->issueLat = Cycles(12);
+		opdescParams->opLat = Cycles(12);
 		opdescParams->opClass = Enums::IntDiv;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList3.opList2";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 3; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(3);
 		opdescParams->opClass = Enums::IprAccess;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
@@ -1720,8 +1773,8 @@ void CortexA15::before_end_of_elaboration()
 
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList4.opList";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 1; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(1);
 		opdescParams->opClass = Enums::IntAlu;
 		fudescParams = new FUDescParams();
 		fudescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList4";
@@ -1751,8 +1804,8 @@ void CortexA15::before_end_of_elaboration()
 
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList0.opList";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 1; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(1);
 		opdescParams->opClass = Enums::IntAlu;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
@@ -1767,8 +1820,8 @@ void CortexA15::before_end_of_elaboration()
 
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList1.opList0";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 3; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(3);
 		opdescParams->opClass = Enums::IntMult;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
@@ -1776,8 +1829,8 @@ void CortexA15::before_end_of_elaboration()
 
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList1.opList1";
-		opdescParams->issueLat = 19;
-		opdescParams->opLat = 20; 
+		opdescParams->issueLat = Cycles(1)9;
+		opdescParams->opLat = Cycles(2)0;
 		opdescParams->opClass = Enums::IntDiv;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
@@ -1792,24 +1845,24 @@ void CortexA15::before_end_of_elaboration()
 
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList2.opList0";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 2; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(2);
 		opdescParams->opClass = Enums::FloatAdd;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList2.opList1";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 2; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(2);
 		opdescParams->opClass = Enums::FloatCmp;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList2.opList2";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 2; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(2);
 		opdescParams->opClass = Enums::FloatCvt;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
@@ -1824,16 +1877,16 @@ void CortexA15::before_end_of_elaboration()
 		
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList3.opList0";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 4; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(4);
 		opdescParams->opClass = Enums::FloatMult;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList3.opList1";
-		opdescParams->issueLat = 12;
-		opdescParams->opLat = 12; 
+		opdescParams->issueLat = Cycles(1)2;
+		opdescParams->opLat = Cycles(1)2;
 		opdescParams->opClass = Enums::FloatDiv;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
@@ -1841,7 +1894,7 @@ void CortexA15::before_end_of_elaboration()
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList3.opList2";
 		opdescParams->issueLat = 24;
-		opdescParams->opLat = 24; 
+		opdescParams->opLat = Cycles(2)4;
 		opdescParams->opClass = Enums::FloatSqrt;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
@@ -1856,8 +1909,8 @@ void CortexA15::before_end_of_elaboration()
 		
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList4.opList";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 1; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(1);
 		opdescParams->opClass = Enums::MemRead;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
@@ -1872,160 +1925,160 @@ void CortexA15::before_end_of_elaboration()
 		
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList5.opList00";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 1; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(1);
 		opdescParams->opClass = Enums::SimdAdd;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList5.opList01";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 1; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(1);
 		opdescParams->opClass = Enums::SimdAddAcc;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList5.opList02";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 1; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(1);
 		opdescParams->opClass = Enums::SimdAlu;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList5.opList03";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 1; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(1);
 		opdescParams->opClass = Enums::SimdCmp;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList5.opList04";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 1; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(1);
 		opdescParams->opClass = Enums::SimdCvt;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList5.opList05";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 1; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(1);
 		opdescParams->opClass = Enums::SimdMisc;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList5.opList06";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 1; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(1);
 		opdescParams->opClass = Enums::SimdMult;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList5.opList07";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 1; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(1);
 		opdescParams->opClass = Enums::SimdMultAcc;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList5.opList08";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 1; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(1);
 		opdescParams->opClass = Enums::SimdShift;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList5.opList09";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 1; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(1);
 		opdescParams->opClass = Enums::SimdShiftAcc;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList5.opList10";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 1; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(1);
 		opdescParams->opClass = Enums::SimdSqrt;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList5.opList11";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 1; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(1);
 		opdescParams->opClass = Enums::SimdFloatAdd;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList5.opList12";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 1; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(1);
 		opdescParams->opClass = Enums::SimdFloatAlu;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList5.opList13";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 1; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(1);
 		opdescParams->opClass = Enums::SimdFloatCmp;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList5.opList14";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 1; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(1);
 		opdescParams->opClass = Enums::SimdFloatCvt;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList5.opList15";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 1; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(1);
 		opdescParams->opClass = Enums::SimdFloatDiv;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList5.opList16";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 1; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(1);
 		opdescParams->opClass = Enums::SimdFloatMisc;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList5.opList17";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 1; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(1);
 		opdescParams->opClass = Enums::SimdFloatMult;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList5.opList18";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 1; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(1);
 		opdescParams->opClass = Enums::SimdFloatMultAcc;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
 		fudescParams->opList.push_back(opdesc);
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList5.opList19";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 1; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(1);
 		opdescParams->opClass = Enums::SimdFloatSqrt;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
@@ -2041,8 +2094,8 @@ void CortexA15::before_end_of_elaboration()
 		
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList6.opList";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 1; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(1);
 		opdescParams->opClass = Enums::MemWrite;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
@@ -2058,8 +2111,8 @@ void CortexA15::before_end_of_elaboration()
 		
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList7.opList0";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 1; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(1);
 		opdescParams->opClass = Enums::MemRead;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
@@ -2067,8 +2120,8 @@ void CortexA15::before_end_of_elaboration()
 
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList7.opList1";
-		opdescParams->issueLat = 1;
-		opdescParams->opLat = 1; 
+		opdescParams->issueLat = Cycles(1);
+		opdescParams->opLat = Cycles(1);
 		opdescParams->opClass = Enums::MemWrite;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
@@ -2085,7 +2138,7 @@ void CortexA15::before_end_of_elaboration()
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList8.opList";
 		opdescParams->issueLat = 3;
-		opdescParams->opLat = 3; 
+		opdescParams->opLat = Cycles(3);
 		opdescParams->opClass = Enums::IprAccess;
 		opdesc=opdescParams->create();
 		objects.push_back((SimObject*)opdesc);
@@ -2122,7 +2175,7 @@ void CortexA15::before_end_of_elaboration()
 		cpuParams->itb=itlb[n];
 		cpuParams->dtb=dtlb[n];
 		cpuParams->tracer=tracer[n];
-		if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
+		if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
 		{
 			cpuParams->system=linuxCortexA15;
 			cpuParams->defer_registration=true;
@@ -2143,45 +2196,45 @@ void CortexA15::before_end_of_elaboration()
 		cpuParams->smtLSQThreshold = 100;
 		cpuParams->BTBEntries = 2048; 
 		cpuParams->dispatchWidth = 6;
-		cpuParams->iewToRenameDelay = 1;
+		cpuParams->iewToRenameDelay = Cycles(1);
 		cpuParams->numROBEntries = 40;
 		cpuParams->squashWidth = 8;
-		cpuParams->renameToROBDelay = 1;
+		cpuParams->renameToROBDelay = Cycles(1);
 		cpuParams->SQEntries = 16;
 		cpuParams->SSITSize = 1024;
 		cpuParams->fetchWidth = 3;
 		cpuParams->backComSize = 5;
 		cpuParams->smtCommitPolicy = "RoundRobin";
-		cpuParams->commitToIEWDelay = 1;
-		cpuParams->commitToDecodeDelay = 1; 
-		cpuParams->decodeToRenameDelay = 2;
-		cpuParams->fetchToDecodeDelay = 3;
+		cpuParams->commitToIEWDelay = Cycles(1);
+		cpuParams->commitToDecodeDelay = Cycles(1);
+		cpuParams->decodeToRenameDelay = Cycles(2);
+		cpuParams->fetchToDecodeDelay = Cycles(3);
 		cpuParams->issueWidth = 8;
 		cpuParams->LSQCheckLoads = true;
 		cpuParams->globalCtrBits = 2;
-		cpuParams->commitToRenameDelay = 1;
+		cpuParams->commitToRenameDelay = Cycles(1);
 		cpuParams->choicePredictorSize = 8192;
 		cpuParams->cachePorts = 200;
-		cpuParams->renameToDecodeDelay = 1;
+		cpuParams->renameToDecodeDelay = Cycles(1);
 		cpuParams->smtFetchPolicy = "SingleThread";
 		cpuParams->store_set_clear_period = 250*clk1.value();//250000;
 		cpuParams->numPhysFloatRegs = 128;
 		cpuParams->numPhysIntRegs = 128;
 		cpuParams->RASSize = 16;
 		cpuParams->wbDepth = 1;
-		cpuParams->issueToExecuteDelay = 1; 
+		cpuParams->issueToExecuteDelay = Cycles(1);
 		cpuParams->predType = "tournament";
 		cpuParams->smtROBThreshold = 100;
 		cpuParams->smtNumFetchingThreads = 1;
 		cpuParams->wbWidth = 8;
-		cpuParams->commitToFetchDelay = 1;
-		cpuParams->fetchTrapLatency = 1;
+		cpuParams->commitToFetchDelay = Cycles(1);
+		cpuParams->fetchTrapLatency = Cycles(1);
 		cpuParams->fuPool = O3v7a_FUP[n]; 
 		cpuParams->localHistoryTableSize = 64;
-		cpuParams->decodeToFetchDelay = 1; 
-		cpuParams->renameToFetchDelay = 1;
+		cpuParams->decodeToFetchDelay = Cycles(1);
+		cpuParams->renameToFetchDelay = Cycles(1);
 		cpuParams->decodeWidth = 3;
-		cpuParams->trapLatency = 13;
+		cpuParams->trapLatency = Cycles(13);
 		cpuParams->smtIQPolicy = "Partitioned";
 		cpuParams->globalHistoryBits = 13;
 		cpuParams->smtROBPolicy = "Partitioned";
@@ -2189,7 +2242,7 @@ void CortexA15::before_end_of_elaboration()
 		cpuParams->choiceCtrBits = 2;
 		cpuParams->numRobs = 1;
 		cpuParams->localHistoryBits = 6;
-		cpuParams->iewToDecodeDelay = 1; 
+		cpuParams->iewToDecodeDelay = Cycles(1);
 		cpuParams->smtLSQPolicy = "Partitioned";
 		cpuParams->commitWidth = 8;
 		cpuParams->globalPredictorSize = 8192;
@@ -2198,9 +2251,9 @@ void CortexA15::before_end_of_elaboration()
 		cpuParams->BTBTagSize = 18;
 		cpuParams->numIQEntries = 32;
 		cpuParams->LFSTSize = 1024;
-		cpuParams->iewToCommitDelay = 1;
-		cpuParams->renameToIEWDelay = 1; 
-		cpuParams->iewToFetchDelay = 1;
+		cpuParams->iewToCommitDelay = Cycles(1);
+		cpuParams->renameToIEWDelay = Cycles(1);
+		cpuParams->iewToFetchDelay = Cycles(1);
 		cpuParams->LQEntries = 16;
 		cpuParams->smtIQThreshold = 100;
 		cpuParams->function_trace = false;
@@ -2210,7 +2263,6 @@ void CortexA15::before_end_of_elaboration()
 		cpuParams->checker = 0x0;
 		cpuParams->profile = 0;
 		cpuParams->max_insts_all_threads = 0;
-		cpuParams->phase = 0;
 		cpuParams->progress_interval = 0;
 		cpuParams->max_loads_any_thread = 0;
 		cpuParams->max_insts_any_thread = 0;
@@ -2227,7 +2279,7 @@ void CortexA15::before_end_of_elaboration()
 		cpuParams->itb=itlb[n];
 		cpuParams->dtb=dtlb[n];
 		cpuParams->tracer=tracer[n];
-		if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
+		if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
 			cpuParams->system=linuxCortexA15;
 		else
 			cpuParams->system=cortexA15;
@@ -2325,63 +2377,65 @@ void CortexA15::before_end_of_elaboration()
   		
 #ifdef USE_A15
 
-		if (_system_cfg != "linux")
-		{
-			baseCacheParams = new BaseCacheParams();
-			baseCacheParams->name=std::string(name())+".cpu"+ss.str()+".icache";
-			baseCacheParams->addr_ranges.push_back(rb);
-			baseCacheParams->assoc = 2;
-			baseCacheParams->block_size = 64;
-			baseCacheParams->forward_snoops = true;
-			baseCacheParams->hash_delay = 1;
-			baseCacheParams->is_top_level = true;
-			baseCacheParams->latency = clk1.value();//1000;
-			baseCacheParams->max_miss_count = 0;
-			baseCacheParams->mshrs = 2;
-			baseCacheParams->prefetch_on_access = false;
-			baseCacheParams->prefetcher = NULL;
-			baseCacheParams->prioritizeRequests = false;
-			baseCacheParams->repl = NULL;
-			baseCacheParams->size = 32768;
-			baseCacheParams->subblock_size = 0;
-			if (_system_cfg == "linuxRestore")
-				baseCacheParams->system=linuxCortexA15;
-			else
-				baseCacheParams->system = cortexA15;
-			baseCacheParams->tgts_per_mshr = 8;
-			baseCacheParams->trace_addr = 0;
-			baseCacheParams->two_queue = false;
-			baseCacheParams->write_buffers = 8;
-			icache[n] = baseCacheParams->create();
-			objects.push_back((SimObject*)icache[n]);
+		baseCacheParams = new BaseCacheParams();
+		baseCacheParams->name=std::string(name())+".cpu"+ss.str()+".icache";
+		baseCacheParams->addr_ranges.push_back(rb);
+		baseCacheParams->assoc = 2;
+		baseCacheParams->block_size = 64;
+		baseCacheParams->forward_snoops = true;
+		baseCacheParams->hash_delay = Cycles(1);
+		baseCacheParams->is_top_level = true;
+		baseCacheParams->hit_latency = Cycles(1);//1000;
+		baseCacheParams->response_latency = Cycles(1);//1000;
+		baseCacheParams->max_miss_count = 0;
+		baseCacheParams->mshrs = 2;
+		baseCacheParams->prefetch_on_access = false;
+		baseCacheParams->prefetcher = NULL;
+		baseCacheParams->prioritizeRequests = false;
+		baseCacheParams->repl = NULL;
+		baseCacheParams->size = 32768;
+		baseCacheParams->subblock_size = 0;
+		if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
+			baseCacheParams->system=linuxCortexA15;
+		else
+			baseCacheParams->system = cortexA15;
+		baseCacheParams->tgts_per_mshr = 8;
+		baseCacheParams->trace_addr = 0;
+		baseCacheParams->two_queue = false;
+		baseCacheParams->write_buffers = 8;
+		baseCacheParams->clock = clk1.value();
+		icache[n] = baseCacheParams->create();
+		objects.push_back((SimObject*)icache[n]);
 
-			baseCacheParams = new BaseCacheParams();
-			baseCacheParams->name=std::string(name())+".cpu"+ss.str()+".dcache";
-			baseCacheParams->addr_ranges.push_back(rb);
-			baseCacheParams->assoc = 2;
-			baseCacheParams->block_size = 64;
-			baseCacheParams->forward_snoops = true;
-			baseCacheParams->hash_delay = 1;
-			baseCacheParams->is_top_level = true;
-			baseCacheParams->latency = 2*clk1.value();//2000;
-			baseCacheParams->max_miss_count = 0;
-			baseCacheParams->mshrs = 6;
-			baseCacheParams->prefetch_on_access = false;
-			baseCacheParams->prefetcher = NULL;
-			baseCacheParams->prioritizeRequests = false;
-			baseCacheParams->repl = NULL;
-			baseCacheParams->size = 32768;
-			baseCacheParams->subblock_size = 0;
-			if (_system_cfg == "linuxRestore")
-				baseCacheParams->system=linuxCortexA15;
-			else
-				baseCacheParams->system = cortexA15;
-			baseCacheParams->tgts_per_mshr = 8;
-			baseCacheParams->trace_addr = 0;
-			baseCacheParams->two_queue = false;
-			baseCacheParams->write_buffers = 16;
-			dcache[n] = baseCacheParams->create();
-			objects.push_back((SimObject*)dcache[n]);
+		baseCacheParams = new BaseCacheParams();
+		baseCacheParams->name=std::string(name())+".cpu"+ss.str()+".dcache";
+		baseCacheParams->addr_ranges.push_back(rb);
+		baseCacheParams->assoc = 2;
+		baseCacheParams->block_size = 64;
+		baseCacheParams->forward_snoops = true;
+		baseCacheParams->hash_delay = Cycles(1);
+		baseCacheParams->is_top_level = true;
+		baseCacheParams->hit_latency = Cycles(2);//2000;
+		baseCacheParams->response_latency = Cycles(2);//2000;
+		baseCacheParams->max_miss_count = 0;
+		baseCacheParams->mshrs = 6;
+		baseCacheParams->prefetch_on_access = false;
+		baseCacheParams->prefetcher = NULL;
+		baseCacheParams->prioritizeRequests = false;
+		baseCacheParams->repl = NULL;
+		baseCacheParams->size = 32768;
+		baseCacheParams->subblock_size = 0;
+		if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
+			baseCacheParams->system=linuxCortexA15;
+		else
+			baseCacheParams->system = cortexA15;
+		baseCacheParams->tgts_per_mshr = 8;
+		baseCacheParams->trace_addr = 0;
+		baseCacheParams->two_queue = false;
+		baseCacheParams->write_buffers = 16;
+		baseCacheParams->clock = clk1.value();
+		dcache[n] = baseCacheParams->create();
+		objects.push_back((SimObject*)dcache[n]);
 
 #else
 
@@ -2410,10 +2464,11 @@ void CortexA15::before_end_of_elaboration()
 		baseCacheParams->prefetch_serial_squash = false;
 		baseCacheParams->prefetch_degree = 1;
 		baseCacheParams->prefetch_policy = Enums::none;
-		baseCacheParams->hash_delay = 1;
+		baseCacheParams->hash_delay = Cycles(1);
 		baseCacheParams->subblock_size = 0;
 		baseCacheParams->prefetcher_size = 100;
 		baseCacheParams->two_queue = false;
+		baseCacheParams->clock = clk1.value();
 		icache[n] = baseCacheParams->create();
 		objects.push_back((SimObject*)icache[n]);
 
@@ -2424,7 +2479,8 @@ void CortexA15::before_end_of_elaboration()
 		baseCacheParams->block_size = 64;
 		baseCacheParams->prefetch_latency = 10*clk1.value();//20000;
 		baseCacheParams->size = 65536;
-		baseCacheParams->latency = 1*clk1.value();//2000;
+		baseCacheParams->hit_latency = Cycles(1);//2000;
+		baseCacheParams->response_latency = Cycles(1);//2000;
 		baseCacheParams->prefetch_past_page = false;
 		baseCacheParams->addr_ranges.push_back(rb);
 		baseCacheParams->num_cpus = 1;
@@ -2442,60 +2498,59 @@ void CortexA15::before_end_of_elaboration()
 		baseCacheParams->prefetch_serial_squash = false;
 		baseCacheParams->prefetch_degree = 1;
 		baseCacheParams->prefetch_policy = Enums::none;
-		baseCacheParams->hash_delay = 1;
+		baseCacheParams->hash_delay = Cycles(1);
 		baseCacheParams->subblock_size = 0;
 		baseCacheParams->prefetcher_size = 100;
 		baseCacheParams->two_queue = false;
+		baseCacheParams->clock = clk1.value();
 		dcache[n] = baseCacheParams->create();
 		objects.push_back((SimObject*)dcache[n]);
 
 #endif
 
-			busParams = new BusParams();
-			busParams->name=std::string(name())+".cpu"+ss.str()+".xtb_walker_cache_bus";
-			busParams->clock = clk1.value();//1000;
-			busParams->header_cycles = 1;
-			busParams->width = 64;// bytes
-			busParams->use_default_range = false;
-			busParams->block_size = 64;
-			busParams->bus_id = 0;// unused?
-			busParams->port_master_connection_count=1;
-			busParams->port_slave_connection_count=2;
-			busParams->port_default_connection_count=0;
-			xtb_walker_cache_bus[n] = busParams->create();
-			objects.push_back((SimObject*)xtb_walker_cache_bus[n]);
+		ncbusParams = new NoncoherentBusParams();
+		ncbusParams->name=std::string(name())+".cpu"+ss.str()+".xtb_walker_cache_bus";
+		ncbusParams->clock = clk1.value();//1000;
+		ncbusParams->header_cycles = Cycles(1);
+		ncbusParams->width = 64;// bytes
+		ncbusParams->use_default_range = false;
+		ncbusParams->block_size = 64;
+		ncbusParams->port_master_connection_count=1;
+		ncbusParams->port_slave_connection_count=2;
+		ncbusParams->port_default_connection_count=0;
+		xtb_walker_cache_bus[n] = ncbusParams->create();
+		objects.push_back((SimObject*)xtb_walker_cache_bus[n]);
 
-		}
 	}
 	
 	
-	AmbaFake * uart_fake[MAX_CORES];
-	for (uint32_t n=_num_cores;n<MAX_CORES;n++)
+//	AmbaFake * uart_fake[MAX_CORES];
+	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
 	{
-		// core number
-		std::stringstream ss;
-		ss << n;
+		/*for (uint32_t n=1;n<4;n++)
+		{
+			// core number
+			std::stringstream ss;
+			ss << n;
 
-		//Fake Uart
+			//Fake Uart
 
-		ambaFakeParams = new AmbaFakeParams();
-		ambaFakeParams->name=std::string(name())+".realview.uart"+ss.str()+"_fake";
-		if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
-			ambaFakeParams->system=linuxCortexA15;
-		else
-			ambaFakeParams->system = cortexA15;
-		if (_gem5_uart_addr_cfg)
-			ambaFakeParams->pio_addr = 0x10009000+n*0x1000;
-		else
-			ambaFakeParams->pio_addr = UART_BADDR+n*0x100000;//0x10009000+n*0x1000;
-		ambaFakeParams->pio_latency = clk1.value();//1000;
-		ambaFakeParams->amba_id = 0;
-		ambaFakeParams->ignore_access = false;
-		uart_fake[n] = ambaFakeParams->create();
-		objects.push_back((SimObject*)uart_fake[n]);
-	}
-	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
-	{
+			ambaFakeParams = new AmbaFakeParams();
+			ambaFakeParams->name=std::string(name())+".realview.uart"+ss.str()+"_fake";
+			if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
+				ambaFakeParams->system=linuxCortexA15;
+			else
+				ambaFakeParams->system = cortexA15;
+			if (_gem5_uart_addr_cfg)
+				ambaFakeParams->pio_addr = 0x10009000+n*0x1000;
+			else
+				ambaFakeParams->pio_addr = UART_BADDR+n*0x100000;//0x10009000+n*0x1000;
+			ambaFakeParams->pio_latency = clk1.value();//1000;
+			ambaFakeParams->amba_id = 0;
+			ambaFakeParams->ignore_access = false;
+			uart_fake[n-1] = ambaFakeParams->create();
+			objects.push_back((SimObject*)uart_fake[n-1]);
+		}*/
 		AtomicSimpleCPUParams* atomicSimpleCPUParams;
 		// core number
 		std::stringstream ss;
@@ -2507,9 +2562,7 @@ void CortexA15::before_end_of_elaboration()
 			// TLBs
 			ArmTableWalkerParams* tableWalkerParams = new ArmTableWalkerParams();
 			tableWalkerParams->name="system.cpu"+ss.str()+".dtb.walker";
-			tableWalkerParams->max_backoff = 100000;
 			tableWalkerParams->sys=linuxCortexA15;
-			tableWalkerParams->min_backoff = 0;
 			linux_dtb_walker[i] = tableWalkerParams->create();
 			objects.push_back((SimObject*)linux_dtb_walker[i]);
 
@@ -2522,9 +2575,7 @@ void CortexA15::before_end_of_elaboration()
 
 			tableWalkerParams = new ArmTableWalkerParams();
 			tableWalkerParams->name="system.cpu"+ss.str()+".itb.walker";
-			tableWalkerParams->max_backoff = 100000;
 			tableWalkerParams->sys=linuxCortexA15;
-			tableWalkerParams->min_backoff = 0;
 			linux_itb_walker[i] = tableWalkerParams->create();
 			objects.push_back((SimObject*)linux_itb_walker[i]);
 
@@ -2554,7 +2605,6 @@ void CortexA15::before_end_of_elaboration()
 			atomicSimpleCPUParams->max_loads_all_threads=0;
 			atomicSimpleCPUParams->max_loads_any_thread=0;
 			atomicSimpleCPUParams->numThreads=1;
-			atomicSimpleCPUParams->phase=0;
 			atomicSimpleCPUParams->profile=0;
 			atomicSimpleCPUParams->progress_interval=0;
 			atomicSimpleCPUParams->simulate_data_stalls=false;
@@ -2587,31 +2637,33 @@ void CortexA15::before_end_of_elaboration()
 	connectPorts((SimObject*)membus,"master",membus_mst_idx++,(SimObject*)a9scu,"pio",-1);
 	connectPorts((SimObject*)membus,"master",membus_mst_idx++,(SimObject*)local_cpu_timer,"pio",-1);
 	connectPorts((SimObject*)membus,"master",membus_mst_idx++,(SimObject*)bridge,"slave",-1);
-	if (_system_cfg != "linux")
-		connectPorts((SimObject*)l2,"mem_side",-1,(SimObject*)membus,"slave",membus_slv_idx++);
+	connectPorts((SimObject*)l2,"mem_side",-1,(SimObject*)membus,"slave",membus_slv_idx++);
 	connectPorts((SimObject*)iocache,"mem_side",-1,(SimObject*)membus,"slave",membus_slv_idx++);
 	
 	connectPorts((SimObject*)bridge,"master",-1,(SimObject*)iobus,"slave",iobus_slv_idx++);
 	connectPorts((SimObject*)iobus,"master",iobus_mst_idx++,(SimObject*)realview_io,"pio",-1);
 	connectPorts((SimObject*)iobus,"master",iobus_mst_idx++,(SimObject*)timer0,"pio",-1);
 	connectPorts((SimObject*)iobus,"master",iobus_mst_idx++,(SimObject*)timer1,"pio",-1);
-	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
+	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
 	{
 		connectPorts((SimObject*)iobus,"master",iobus_mst_idx++,(SimObject*)clcd,"pio",-1);
 		connectPorts((SimObject*)clcd,"dma",-1,(SimObject*)iobus,"slave",iobus_slv_idx++);
 		connectPorts((SimObject*)iobus,"master",iobus_mst_idx++,(SimObject*)kmi0,"pio",-1);
 		connectPorts((SimObject*)iobus,"master",iobus_mst_idx++,(SimObject*)kmi1,"pio",-1);
+		for (uint32_t n=0;n<4;n++)
+		{
+			connectPorts((SimObject*)iobus,"master",iobus_mst_idx++,(SimObject*)uart[n],"pio",-1);
+		}
+	}
+	else
+	{
+		for (uint32_t n=0;n<_num_cores;n++)
+		{
+			connectPorts((SimObject*)iobus,"master",iobus_mst_idx++,(SimObject*)uart[n],"pio",-1);
+		}
 	}
 	connectPorts((SimObject*)iobus,"master",iobus_mst_idx++,(SimObject*)cf_ctrl,"pio",-1);
 	connectPorts((SimObject*)iobus,"master",iobus_mst_idx++,(SimObject*)dmac_fake,"pio",-1);
-	for (uint32_t n=0;n<_num_cores;n++)
-	{
-		connectPorts((SimObject*)iobus,"master",iobus_mst_idx++,(SimObject*)uart[n],"pio",-1);
-	}
-	for (uint32_t n=_num_cores;n<MAX_CORES;n++)
-	{
-		connectPorts((SimObject*)iobus,"master",iobus_mst_idx++,(SimObject*)uart_fake[n],"pio",-1);
-	}
 	connectPorts((SimObject*)iobus,"master",iobus_mst_idx++,(SimObject*)smc_fake,"pio",-1);
 	connectPorts((SimObject*)iobus,"master",iobus_mst_idx++,(SimObject*)sp810_fake,"pio",-1);
 	connectPorts((SimObject*)iobus,"master",iobus_mst_idx++,(SimObject*)watchdog_fake,"pio",-1);
@@ -2626,56 +2678,42 @@ void CortexA15::before_end_of_elaboration()
 //	connectPorts((SimObject*)flash_fake,"pio",-1,(SimObject*)iobus,"port",24);
 	connectPorts((SimObject*)iobus,"master",iobus_mst_idx++,(SimObject*)cf_ctrl,"config",-1);
 	connectPorts((SimObject*)cf_ctrl,"dma",-1,(SimObject*)iobus,"slave",iobus_slv_idx++);
-	if (_system_cfg != "linux")
-		connectPorts((SimObject*)tol2bus,"master",tol2bus_mst_idx++,(SimObject*)l2,"cpu_side",-1);
+	connectPorts((SimObject*)tol2bus,"master",tol2bus_mst_idx++,(SimObject*)l2,"cpu_side",-1);
 	
 	for (uint32_t n=0;n<_num_cores;n++)
 	{
-		if (_system_cfg != "linux")
-		{
-			connectPorts((SimObject*)icache[n],"mem_side",-1,(SimObject*)tol2bus,"slave",tol2bus_slv_idx++);
-			connectPorts((SimObject*)dcache[n],"mem_side",-1,(SimObject*)tol2bus,"slave",tol2bus_slv_idx++);
+		connectPorts((SimObject*)icache[n],"mem_side",-1,(SimObject*)tol2bus,"slave",tol2bus_slv_idx++);
+		connectPorts((SimObject*)dcache[n],"mem_side",-1,(SimObject*)tol2bus,"slave",tol2bus_slv_idx++);
 
-			if (_system_cfg == "linuxRestore")
-			{
-				connectPorts((SimObject*)linux_itb_walker[n],"port",-1,(SimObject*)xtb_walker_cache_bus[n],"slave",xtb_walker_cache_bus_slv_idx[n]++);
-				connectPorts((SimObject*)linux_dtb_walker[n],"port",-1,(SimObject*)xtb_walker_cache_bus[n],"slave",xtb_walker_cache_bus_slv_idx[n]++);
-				connectPorts((SimObject*)dummy_cpu[n],"icache_port",-1,(SimObject*)icache[n],"cpu_side",-1);
-				connectPorts((SimObject*)dummy_cpu[n],"dcache_port",-1,(SimObject*)dcache[n],"cpu_side",-1);
-			}
-			else
-			{
-				connectPorts((SimObject*)itb_walker[n],"port",-1,(SimObject*)xtb_walker_cache_bus[n],"slave",xtb_walker_cache_bus_slv_idx[n]++);
-				connectPorts((SimObject*)dtb_walker[n],"port",-1,(SimObject*)xtb_walker_cache_bus[n],"slave",xtb_walker_cache_bus_slv_idx[n]++);
-				connectPorts((SimObject*)cpu[n],"icache_port",-1,(SimObject*)icache[n],"cpu_side",-1);
-				connectPorts((SimObject*)cpu[n],"dcache_port",-1,(SimObject*)dcache[n],"cpu_side",-1);
-			}
-			connectPorts((SimObject*)xtb_walker_cache_bus[n],"master",xtb_walker_cache_bus_mst_idx[n]++,(SimObject*)xtb_walker_cache[n],"cpu_side",-1);
-			connectPorts((SimObject*)xtb_walker_cache[n],"mem_side",-1,(SimObject*)tol2bus,"slave",tol2bus_slv_idx++);
+		if ((_system_cfg == "linuxRestore") || (_system_cfg == "linux"))
+		{
+			connectPorts((SimObject*)linux_itb_walker[n],"port",-1,(SimObject*)xtb_walker_cache_bus[n],"slave",xtb_walker_cache_bus_slv_idx[n]++);
+			connectPorts((SimObject*)linux_dtb_walker[n],"port",-1,(SimObject*)xtb_walker_cache_bus[n],"slave",xtb_walker_cache_bus_slv_idx[n]++);
+			connectPorts((SimObject*)dummy_cpu[n],"icache_port",-1,(SimObject*)icache[n],"cpu_side",-1);
+			connectPorts((SimObject*)dummy_cpu[n],"dcache_port",-1,(SimObject*)dcache[n],"cpu_side",-1);
 		}
 		else
 		{
-			connectPorts((SimObject*)linux_itb_walker[n],"port",-1,(SimObject*)membus,"slave",membus_slv_idx++);
-			connectPorts((SimObject*)linux_dtb_walker[n],"port",-1,(SimObject*)membus,"slave",membus_slv_idx++);
-			connectPorts((SimObject*)dummy_cpu[n],"icache_port",-1,(SimObject*)membus,"slave",membus_slv_idx++);
-			connectPorts((SimObject*)dummy_cpu[n],"dcache_port",-1,(SimObject*)membus,"slave",membus_slv_idx++);
+			connectPorts((SimObject*)itb_walker[n],"port",-1,(SimObject*)xtb_walker_cache_bus[n],"slave",xtb_walker_cache_bus_slv_idx[n]++);
+			connectPorts((SimObject*)dtb_walker[n],"port",-1,(SimObject*)xtb_walker_cache_bus[n],"slave",xtb_walker_cache_bus_slv_idx[n]++);
+			connectPorts((SimObject*)cpu[n],"icache_port",-1,(SimObject*)icache[n],"cpu_side",-1);
+			connectPorts((SimObject*)cpu[n],"dcache_port",-1,(SimObject*)dcache[n],"cpu_side",-1);
 		}
-
+		connectPorts((SimObject*)xtb_walker_cache_bus[n],"master",xtb_walker_cache_bus_mst_idx[n]++,(SimObject*)xtb_walker_cache[n],"cpu_side",-1);
+		connectPorts((SimObject*)xtb_walker_cache[n],"mem_side",-1,(SimObject*)tol2bus,"slave",tol2bus_slv_idx++);
 	}	
 	
 	connectPorts((SimObject*)iobus,"master",iobus_mst_idx++,(SimObject*)iocache,"cpu_side",-1);
 //	connectPorts((SimObject*)iobus,"default",-1,(SimObject*)badaddr_responder2,"pio",-1);
 
 
-	/*SC_METHOD(service_config_bus);
-	dont_initialize();
-	for (int i = 0; i < nerios_cfg_port.size(); i++)
-	{
-		sensitive << nerios_cfg_port[i]->value_changed_event();
-		nerios_cfg_port[i]->set_slave_name(string(basename()));
-	};*/
-
-   SC_THREAD(running_the_kernel);
+//	SC_METHOD(service_config_bus);
+//	dont_initialize();
+//	for (int i = 0; i < nerios_cfg_port.size(); i++)
+//	{
+//		sensitive << nerios_cfg_port[i]->value_changed_event();
+//		nerios_cfg_port[i]->set_slave_name(string(basename()));
+//	};
 
 
 	enable_debug(_debug_flags_cfg);
@@ -2697,6 +2735,14 @@ void CortexA15::before_end_of_elaboration()
 		for (uint32_t i=0;i<_num_cores;i++)
 			dummy_cpu[i]->init();
 	}
+	else if (_system_cfg == "linuxCAboot")
+	{
+		linuxCortexA15->init();
+		for (uint32_t i=0;i<objects.size();i++)
+			objects[i]->init();
+		for (uint32_t i=0;i<_num_cores;i++)
+			cpu[i]->init();
+	}
 	else
 	{
 		cortexA15->init();
@@ -2711,6 +2757,8 @@ void CortexA15::before_end_of_elaboration()
 		for (uint32_t i=0;i<_num_cores;i++)
 			dummy_cpu[i]->regStats();
 	}
+	else if (_system_cfg == "linuxCAboot")
+		linuxCortexA15->regStats();
 	else
 		cortexA15->regStats();
 	for (uint32_t i=0;i<objects.size();i++)
@@ -2718,19 +2766,6 @@ void CortexA15::before_end_of_elaboration()
 	for (uint32_t i=0;i<_num_cores;i++)
 		cpu[i]->regStats();
 		
-	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))
-	{
-		linuxCortexA15->regFormulas();
-		for (uint32_t i=0;i<_num_cores;i++)
-			dummy_cpu[i]->regFormulas();
-	}
-	else
-		cortexA15->regFormulas();
-	for (uint32_t i=0;i<objects.size();i++)
-		objects[i]->regFormulas();
-	for (uint32_t i=0;i<_num_cores;i++)
-		cpu[i]->regFormulas();
-
 	// We're done registering statistics.  Enable the stats package now.
 	std::list<Stats::Info *> listinfo = Stats::statsList();
 	for (std::list<Stats::Info *>::iterator iter2=listinfo.begin();iter2!=listinfo.end();++iter2)
@@ -2752,47 +2787,47 @@ void CortexA15::switch_cpus()
 		for (uint32_t i=0;i<_num_cores;i++)
 			cpu[i]->init();
 	}
-	CountedDrainEvent* countedDrainEvent = new CountedDrainEvent();
-	linuxCortexA15->drain(countedDrainEvent);
+	DrainManager* drainManager = new DrainManager();
+	linuxCortexA15->drain(drainManager);
 	for (uint32_t i=0;i<objects.size();i++)
-		objects[i]->drain(countedDrainEvent);
+		objects[i]->drain(drainManager);
 	for (uint32_t i=0;i<_num_cores;i++)
-		dummy_cpu[i]->drain(countedDrainEvent);
+		dummy_cpu[i]->drain(drainManager);
 
     linuxCortexA15->setMemoryMode(Enums::timing);
 
     for (uint32_t i=0;i<_num_cores;i++)
     {
     	(reinterpret_cast<BaseCPU*>(dummy_cpu[i]))->switchOut();
-		(reinterpret_cast<SimObject*>(cpu[i]))->takeOverFrom(reinterpret_cast<BaseCPU*>(dummy_cpu[i]));
+		(reinterpret_cast<BaseCPU*>(cpu[i]))->takeOverFrom(reinterpret_cast<BaseCPU*>(dummy_cpu[i]));
     }
 
-	linuxCortexA15->resume();
+	linuxCortexA15->drainResume();
 	for (uint32_t i=0;i<objects.size();i++)
-		objects[i]->resume();
+		objects[i]->drainResume();
 	for (uint32_t i=0;i<_num_cores;i++)
-		cpu[i]->resume();
+		cpu[i]->drainResume();
 };
 
 void CortexA15::checkpoint(const std::string &cpt_dir)
 {
 	curTick(sc_core::sc_time_stamp().value());
 
-	CountedDrainEvent* countedDrainEvent = new CountedDrainEvent();
-	linuxCortexA15->drain(countedDrainEvent);
+	DrainManager* drainManager = new DrainManager();
+	linuxCortexA15->drain(drainManager);
 	for (uint32_t i=0;i<objects.size();i++)
-		objects[i]->drain(countedDrainEvent);
+		objects[i]->drain(drainManager);
 	for (uint32_t i=0;i<_num_cores;i++)
-		dummy_cpu[i]->drain(countedDrainEvent);
+		dummy_cpu[i]->drain(drainManager);
 
 	_mem_is_serialized=false;
 	Serializable::serializeAll(cpt_dir);
 
-	linuxCortexA15->resume();
+	linuxCortexA15->drainResume();
 	for (uint32_t i=0;i<objects.size();i++)
-		objects[i]->resume();
+		objects[i]->drainResume();
 	for (uint32_t i=0;i<_num_cores;i++)
-		cpu[i]->resume();
+		cpu[i]->drainResume();
 };
 
 void CortexA15::start_of_simulation()
@@ -2846,11 +2881,11 @@ void CortexA15::start_of_simulation()
 		for (uint32_t i=0;i<_num_cores;i++)
 			cpu[i]->startup();
 
-		linuxCortexA15->resume();
+		linuxCortexA15->drainResume();
 		for (uint32_t i=0;i<objects.size();i++)
-			objects[i]->resume();
+			objects[i]->drainResume();
 		for (uint32_t i=0;i<_num_cores;i++)
-			dummy_cpu[i]->resume();
+			dummy_cpu[i]->drainResume();
 		gem5_event_queue.cp_timestamp=0;
 		switch_cpus_evt.notify(11*clk1);
 	}
@@ -2877,7 +2912,7 @@ void CortexA15::start_of_simulation()
 //		for (uint32_t i=0;i<_num_cores;i++)
 //			cpu[i]->resetStats();
 
-                linuxCortexA15->startup();
+		linuxCortexA15->startup();
 		for (uint32_t i=0;i<objects.size();i++)
 			objects[i]->startup();
 		for (uint32_t i=0;i<_num_cores;i++)
