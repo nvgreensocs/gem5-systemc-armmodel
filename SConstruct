@@ -19,8 +19,6 @@
 #tlm_vob='../tlm/'
 #loki='../loki'
 
-#NOTE: to build with gem5 run fist ../../../tools/scons/bin/scons build/ARM/libgem5_debug.a
-
 #imports
 
 from subprocess import call
@@ -162,7 +160,7 @@ if ((build_mode == 'release') | (build_mode == 'fast')):
 	
 # setting includes
 
-env.Append(CPPPATH=[ Dir('amba_socket'),Dir('amba_socket'+os.sep+'dependencies'+os.sep+'AMBA-PV'+os.sep+'include'),Dir('gem5'+os.sep+'src'),py_includes,Dir('gem5'+os.sep+'build'+os.sep+'ARM'),Dir('greensocs'+os.sep+'include'),Dir('gem5_ArmA15'+os.sep+'include'),Dir(os.sep+'usr'+os.sep+'local'+os.sep+'systemc-2.3.0'+os.sep+'include') ])
+env.Append(CPPPATH=[ Dir('amba_socket'),Dir('amba_socket'+os.sep+'dependencies'+os.sep+'AMBA-PV'+os.sep+'include'),Dir('gem5'+os.sep+'src'),py_includes,Dir('gem5'+os.sep+'build'+os.sep+'ARM'),Dir('greensocs'+os.sep+'include'),Dir('ArmA15'+os.sep+'include'),Dir(os.sep+'usr'+os.sep+'local'+os.sep+'systemc-2.3.0'+os.sep+'include') ])
 
 # setting defines
 
@@ -232,7 +230,7 @@ gem5_num_exts = 1
 
 target='gem5'
 env.SConscript('SConscript', duplicate=0, exports='target env build_mode gem5_num_exts')
-env.SharedLibrary(target = 'armA15_systemC', source = [ Glob('gem5_ArmA15'+ os.sep + 'src' + os.sep +'*.cpp')])
+env.SharedLibrary(target = 'ArmA15'+os.sep+'lib'+os.sep+'armA15', source = [ Glob('ArmA15'+ os.sep + 'src' + os.sep +'*.cpp')])
 
 #obj_path='components'+os.sep+'gem5'+os.sep+'lib_ext'+os.sep+postfix
 #myScript=SConscript('components'+os.sep+'gem5'+os.sep+'SConscript', variant_dir=obj_path, duplicate=0, exports='build_mode env')
