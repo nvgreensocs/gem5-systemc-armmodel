@@ -10,7 +10,7 @@
 
 Project :  Nerios
 
-Author	:	A. Roma�a
+Author	:	A. Romana
 
 Date	:	Q4 2011
 
@@ -158,15 +158,12 @@ public:
 
 	// ports
 	
-	//sc_core::sc_port<Nerios_slave_config_if, 0, sc_core::SC_ZERO_OR_MORE_BOUND> nerios_cfg_port;
-	
 	SC_HAS_PROCESS(CortexA15);
 	CortexA15(sc_core::sc_module_name nm, std::string cfg_port_name, std::string ace_master_name,std::string debug_master_name);
 	
 	//cpus database
 	static std::map<std::string,CortexA15*> CA15;
 	std::map<std::string,FullO3CPU<O3CPUImpl> *> cpus;
-//	Nerios_config*   _current_request;
 	uint32_t         _num_cores;
 	static uint32_t  _global_num_cores;
 	static bool      _mem_is_serialized;

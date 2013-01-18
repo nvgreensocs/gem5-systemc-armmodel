@@ -323,27 +323,21 @@ void CortexA15::enable_debug(std::string debug_string)
 
 void CortexA15::empty_requests()
 {
-	//if ((_current_request == NULL) && (_pending_requests.size() > 0) && (_system_cfg == "bareMetal") )
 	{
 		curTick(sc_core::sc_time_stamp().value());
 		
-	//	_current_request=_pending_requests.front();
-	//	_pending_requests.pop();
-		// registering state
-		//Vsu::state_collector.add_state(_current_request->task_name,sc_core::sc_time_stamp().value(),RUNNING,name());
-
 		// enable debug
 		std::string debug_gem5="";
-		m_Api->getValue<std::string> ("Tasks.test.Task1.debug",debug_gem5);
+		m_Api->getValue<std::string> (std::string(name())+".debug_flags",debug_gem5);
 		enable_debug(debug_gem5);
 
 		uint32_t frq_mhz = uint32_t(ceil(1000000/clk1.value()));
 		std::cout << name() << " running at " << frq_mhz << " MHz" << std::endl;
 		ArmSystemParams* sysPars= const_cast<ArmSystemParams*>(cortexA15->params());
 		//if (m_Api->existsParam("Tasks." + _current_request->task_name + ".kernel"))
-		if (m_Api->existsParam("Tasks.test.Task1.kernel"))
+		if (m_Api->existsParam(std::string(name())+".kernel"))
 		{
-			sysPars->kernel=m_Api->getValue("Tasks.test.Task1.kernel");
+			sysPars->kernel=m_Api->getValue(std::string(name())+".kernel");
 			std::cout << "STARTING kernel " << cortexA15->params()->kernel << " on " << name() << " all cores" << std::endl;
 
             // Get the kernel code
@@ -2706,15 +2700,7 @@ void CortexA15::before_end_of_elaboration()
 	connectPorts((SimObject*)iobus,"master",iobus_mst_idx++,(SimObject*)iocache,"cpu_side",-1);
 //	connectPorts((SimObject*)iobus,"default",-1,(SimObject*)badaddr_responder2,"pio",-1);
 
-
-//	SC_METHOD(service_config_bus);
-//	dont_initialize();
-//	for (int i = 0; i < nerios_cfg_port.size(); i++)
-//	{
-//		sensitive << nerios_cfg_port[i]->value_changed_event();
-//		nerios_cfg_port[i]->set_slave_name(string(basename()));
-//	};
-
+	SC_THREAD(running_the_kernel);
 
 	enable_debug(_debug_flags_cfg);
 	
@@ -2924,10 +2910,8 @@ void CortexA15::start_of_simulation()
 void CortexA15::running_the_kernel()
 {
    wait(SC_ZERO_TIME);
-	//while (true){
       if (!((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))){
           empty_requests();
       }
-   //}
 }
 
