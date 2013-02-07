@@ -160,7 +160,9 @@ if ((build_mode == 'release') | (build_mode == 'fast')):
 	
 # setting includes
 
-env.Append(CPPPATH=[ Dir('..'+os.sep+'amba_socket'),Dir('..'+os.sep+'amba_socket'+os.sep+'dependencies'+os.sep+'AMBA-PV'+os.sep+'include'),Dir('gem5'+os.sep+'src'),py_includes,Dir('gem5'+os.sep+'build'+os.sep+'ARM'),Dir('..'+os.sep+'greensocs'+os.sep+'include'),Dir('ArmA15'+os.sep+'include'),Dir(os.sep+'usr'+os.sep+'local'+os.sep+'systemc-2.3.0'+os.sep+'include') ])
+systemc_home=env['SYSTEMC_HOME']
+
+env.Append(CPPPATH=[ Dir('..'+os.sep+'amba_socket'),Dir('..'+os.sep+'amba_socket'+os.sep+'dependencies'+os.sep+'AMBA-PV'+os.sep+'include'),Dir('gem5'+os.sep+'src'),py_includes,Dir('gem5'+os.sep+'build'+os.sep+'ARM'),Dir('..'+os.sep+'greensocs'+os.sep+'include'),Dir('ArmA15'+os.sep+'include'),Dir(os.sep+'usr'+os.sep+'local'+os.sep+'systemc-2.3.0'+os.sep+'include'), Dir(systemc_home+os.sep+'include')])
 
 # setting defines
 
