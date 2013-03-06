@@ -7,9 +7,9 @@
 
 /*CS******************************************************************
 
-Project :	CIV TLM
+Project :	Trident
 
-Author	:       Alexandre Romana
+Author	:   Alexandre Romana
 
 Date	:	Q4 2011
 
@@ -18,6 +18,8 @@ File	:	cortexA15.cpp
 Purpose	:	Implementation unit for the cortex A15
 
 Description:
+
+Notes:
 
 VNC access is commented out - uncomment to re-enable
 
@@ -42,7 +44,6 @@ VNC access is commented out - uncomment to re-enable
 /*************** macros definition ***************/
 
 #define UART_BADDR 0x10100000
-#define USE_A15
 
 /*************** types definition ***************/
 
@@ -495,7 +496,6 @@ void CortexA15::before_end_of_elaboration()
 		sysParam->mem_mode=Enums::atomic;
 		//sysParam->mem_mode=Enums::timing;
 		sysParam->memories.push_back(toACEbridge);
-		sysParam->midr_regval=890224640;
 		sysParam->num_work_ids=16;
 		sysParam->atags_addr=256;
 //		sysParam->physmem=toACEbridge;
@@ -507,6 +507,7 @@ void CortexA15::before_end_of_elaboration()
 		sysParam->work_end_ckpt_count=0;
 		sysParam->work_end_exit_count=0;
 		sysParam->work_item_id=-1;
+        sysParam->clock  = clk1.value();
 		sysParam->readfile=_linux_readfile_cfg;
 		linuxCortexA15 = sysParam->create();
 		
@@ -557,10 +558,10 @@ void CortexA15::before_end_of_elaboration()
 		sysParam->work_begin_cpu_id_exit = -1;
 		sysParam->gic_cpu_addr = 0, 
 //		sysParam->boot_loader_mem = 0x0;
-		sysParam->midr_regval = 890224640;
 		sysParam->boot_loader = "";
 		sysParam->flags_addr = 0;
 		sysParam->num_work_ids=16;
+        sysParam->clock  = clk1.value();
 		cortexA15 = sysParam->create();
 	}
 
@@ -570,42 +571,36 @@ void CortexA15::before_end_of_elaboration()
 	baseCacheParams->assoc = 8;
 	baseCacheParams->block_size = 64;
 	baseCacheParams->forward_snoops = false;
-	baseCacheParams->hash_delay = Cycles(1);
 	baseCacheParams->is_top_level = true;
 	baseCacheParams->hit_latency = Cycles(10);//10000;
-	baseCacheParams->response_latency = Cycles(10);//10000;
+	baseCacheParams->response_latency = Cycles(50);//10000;
 	baseCacheParams->max_miss_count = 0;
 	baseCacheParams->mshrs = 20;
 	baseCacheParams->prefetch_on_access = false;
 	baseCacheParams->prefetcher = NULL;
-	baseCacheParams->prioritizeRequests = false;
-	baseCacheParams->repl = NULL;
 	baseCacheParams->size = 1024;
-	baseCacheParams->subblock_size = 0;
 	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
 		baseCacheParams->system=linuxCortexA15;
 	else
 		baseCacheParams->system = cortexA15;
 	baseCacheParams->tgts_per_mshr = 12;
-	baseCacheParams->trace_addr = 0;
 	baseCacheParams->two_queue = false;
 	baseCacheParams->write_buffers = 8;
 	baseCacheParams->clock  = clk1.value();
   	BaseCache * iocache = baseCacheParams->create();
   	objects.push_back((SimObject*)iocache);
 
-#ifdef USE_A15
-
   	BaseCache * l2;
-  		StridePrefetcherParams* stridePrefetcherParams = new StridePrefetcherParams();
-		stridePrefetcherParams->name=std::string(name())+".l2.prefetcher";
-		stridePrefetcherParams->cross_pages=false;
-		stridePrefetcherParams->data_accesses_only=false;
-		stridePrefetcherParams->degree=8;
-		stridePrefetcherParams->serial_squash=false;
-		stridePrefetcherParams->size=100;
-		stridePrefetcherParams->use_master_id=true;
+    StridePrefetcherParams* stridePrefetcherParams = new StridePrefetcherParams();
+    stridePrefetcherParams->name=std::string(name())+".l2.prefetcher";
+    stridePrefetcherParams->cross_pages=false;
+    stridePrefetcherParams->data_accesses_only=false;
+    stridePrefetcherParams->degree=8;
+    stridePrefetcherParams->serial_squash=false;
+    stridePrefetcherParams->size=100;
+    stridePrefetcherParams->use_master_id=true;
 	stridePrefetcherParams->latency = Cycles(1);//1000;
+    stridePrefetcherParams->clock = clk1.value();
 	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
 			stridePrefetcherParams->sys=linuxCortexA15;
 		else
@@ -628,7 +623,6 @@ void CortexA15::before_end_of_elaboration()
 		baseCacheParams->assoc = 8;
 		baseCacheParams->block_size = 64;
 		baseCacheParams->forward_snoops = true;
-	baseCacheParams->hash_delay = Cycles(1);
 		baseCacheParams->is_top_level = false;
 		uint32_t l2_cachesize = _l2_cachesize_cfg;
 		if (l2_cachesize <= 512)
@@ -673,12 +667,8 @@ void CortexA15::before_end_of_elaboration()
 	baseCacheParams->max_miss_count = 0;
 	baseCacheParams->mshrs = 16;
 	baseCacheParams->prefetch_on_access = true;
-	baseCacheParams->prioritizeRequests = false;
-	baseCacheParams->repl = NULL;
 	baseCacheParams->size = _l2_cachesize_cfg*1024;
-	baseCacheParams->subblock_size = 0;
 	baseCacheParams->tgts_per_mshr = 8;
-	baseCacheParams->trace_addr = 0;
 	baseCacheParams->two_queue = false;
 	baseCacheParams->write_buffers = 8;
 	baseCacheParams->prefetcher=(BasePrefetcher*)l2_prefetcher;
@@ -689,38 +679,6 @@ void CortexA15::before_end_of_elaboration()
 	baseCacheParams->clock = clk1.value();
 	l2 = baseCacheParams->create();
 	objects.push_back((SimObject*)l2);
-
-#else
-
-	baseCacheParams = new BaseCacheParams();
-	baseCacheParams->name=std::string(name())+".l2";
-	baseCacheParams->write_buffers = 8;
-	baseCacheParams->is_top_level = false;
-	baseCacheParams->block_size = 64;
-	baseCacheParams->prefetch_latency = 100;//1000;
-	baseCacheParams->size = _l2_cachesize_cfg*1024;
-	baseCacheParams->hit_latency = Cycles(16);//14000;
-	baseCacheParams->response_latency = Cycles(16);//14000;
-	baseCacheParams->addr_ranges.push_back(rb);
-	baseCacheParams->num_cpus = _num_cores;
-	baseCacheParams->trace_addr = 0;
-	baseCacheParams->max_miss_count = 0;
-	baseCacheParams->mshrs = 20;
-	baseCacheParams->forward_snoops = true;
-	baseCacheParams->tgts_per_mshr = 12;
-	baseCacheParams->repl = 0x0;
-	baseCacheParams->assoc = 8;
-	baseCacheParams->prefetcher = NULL;
-	baseCacheParams->prioritizeRequests = false;
-	baseCacheParams->hash_delay = Cycles(1);
-	baseCacheParams->subblock_size = 0;
-	baseCacheParams->prefetcher_size = 100;
-	baseCacheParams->two_queue = false;
-	baseCacheParams->clock  = clk1.value();
-	BaseCache * l2 = baseCacheParams->create();
-  	objects.push_back((SimObject*)l2);
-
-#endif
 
 	IntrControlParams * intCtrlParams = new IntrControlParams();
 	intCtrlParams->name=std::string(name())+".intrctrl";
@@ -810,6 +768,7 @@ void CortexA15::before_end_of_elaboration()
     isafkParams->pio_size = 8;
     isafkParams->ret_data32 = 0xFFFFFFFF;
     isafkParams->ret_data16 = 0xFFFF;
+    isafkParams->clock = clk1.value();
     IsaFake * badaddr_responder = isafkParams->create();
 	objects.push_back((SimObject*)badaddr_responder);
 
@@ -869,6 +828,7 @@ void CortexA15::before_end_of_elaboration()
     isafkParams->pio_size = 4095;
     isafkParams->ret_data32 = 0xFFFFFFFF;
     isafkParams->ret_data16 = 0xFFFF;
+    isafkParams->clock = clk1.value();
     IsaFake * l2x0_fake = isafkParams->create();
 	objects.push_back((SimObject*)l2x0_fake);
 	
@@ -891,6 +851,7 @@ void CortexA15::before_end_of_elaboration()
 		a9scuParams->system = cortexA15;
     a9scuParams->pio_addr = 0x1f000000;
     a9scuParams->pio_latency = clk1.value();//1000;
+    a9scuParams->clock = clk1.value();
 	A9SCU * a9scu = a9scuParams->create();
 	objects.push_back((SimObject*)a9scu);
 	
@@ -904,6 +865,7 @@ void CortexA15::before_end_of_elaboration()
 	ambaFakeParams->pio_latency = clk1.value();//1000;
 	ambaFakeParams->amba_id = 0;
 	ambaFakeParams->ignore_access = false;
+  	ambaFakeParams->clock = clk1.value();
 	AmbaFake * mmc_fake = ambaFakeParams->create();
 	objects.push_back((SimObject*)mmc_fake);
 	
@@ -918,6 +880,7 @@ void CortexA15::before_end_of_elaboration()
 	ambaFakeParams->pio_latency = clk1.value();//1000;
 	ambaFakeParams->amba_id = 0;
 	ambaFakeParams->ignore_access = false;
+  	ambaFakeParams->clock = clk1.value();
 	AmbaFake * watchdog_fake = ambaFakeParams->create();
 	objects.push_back((SimObject*)watchdog_fake);
 	
@@ -932,6 +895,7 @@ void CortexA15::before_end_of_elaboration()
 	ambaFakeParams->pio_latency = clk1.value();//1000;
 	ambaFakeParams->amba_id = 0;
 	ambaFakeParams->ignore_access = false;
+  	ambaFakeParams->clock = clk1.value();
 	AmbaFake * gpio0_fake = ambaFakeParams->create();
 	objects.push_back((SimObject*)gpio0_fake);
 	
@@ -946,6 +910,7 @@ void CortexA15::before_end_of_elaboration()
 	ambaFakeParams->pio_latency = clk1.value();//1000;
 	ambaFakeParams->amba_id = 0;
 	ambaFakeParams->ignore_access = false;
+  	ambaFakeParams->clock = clk1.value();
 	AmbaFake * gpio1_fake = ambaFakeParams->create();
 	objects.push_back((SimObject*)gpio1_fake);
 	
@@ -960,6 +925,7 @@ void CortexA15::before_end_of_elaboration()
 	ambaFakeParams->pio_latency = clk1.value();//1000;
 	ambaFakeParams->amba_id = 0;
 	ambaFakeParams->ignore_access = false;
+  	ambaFakeParams->clock = clk1.value();
 	AmbaFake * gpio2_fake = ambaFakeParams->create();
 	objects.push_back((SimObject*)gpio2_fake);
 	
@@ -974,6 +940,7 @@ void CortexA15::before_end_of_elaboration()
 	ambaFakeParams->pio_latency = clk1.value();//1000;
 	ambaFakeParams->amba_id = 0;
 	ambaFakeParams->ignore_access = false;
+  	ambaFakeParams->clock = clk1.value();
 	AmbaFake * dmac_fake = ambaFakeParams->create();
 	objects.push_back((SimObject*)dmac_fake);
 
@@ -988,6 +955,7 @@ void CortexA15::before_end_of_elaboration()
 	ambaFakeParams->pio_latency = clk1.value();//1000;
 	ambaFakeParams->amba_id = 0;
 	ambaFakeParams->ignore_access = false;
+  	ambaFakeParams->clock = clk1.value();
 	AmbaFake * aaci_fake = ambaFakeParams->create();
 	objects.push_back((SimObject*)aaci_fake);
 
@@ -1002,6 +970,7 @@ void CortexA15::before_end_of_elaboration()
 	ambaFakeParams->pio_latency = clk1.value();//1000;
 	ambaFakeParams->amba_id = 0;
 	ambaFakeParams->ignore_access = false;
+  	ambaFakeParams->clock = clk1.value();
 	AmbaFake * ssp_fake = ambaFakeParams->create();
 	objects.push_back((SimObject*)ssp_fake);
 	
@@ -1016,6 +985,7 @@ void CortexA15::before_end_of_elaboration()
 	ambaFakeParams->pio_latency = clk1.value();//1000;
 	ambaFakeParams->amba_id = 0;
 	ambaFakeParams->ignore_access = false;
+  	ambaFakeParams->clock = clk1.value();
 	AmbaFake * rtc_fake = ambaFakeParams->create();
 	objects.push_back((SimObject*)rtc_fake);
 	
@@ -1030,6 +1000,7 @@ void CortexA15::before_end_of_elaboration()
 	ambaFakeParams->pio_latency = clk1.value();//1000;
 	ambaFakeParams->amba_id = 0;
 	ambaFakeParams->ignore_access = false;
+  	ambaFakeParams->clock = clk1.value();
 	AmbaFake * smc_fake = ambaFakeParams->create();
 	objects.push_back((SimObject*)smc_fake);
 	
@@ -1044,6 +1015,7 @@ void CortexA15::before_end_of_elaboration()
 	ambaFakeParams->pio_latency = clk1.value();//1000;
 	ambaFakeParams->amba_id = 0;
 	ambaFakeParams->ignore_access = true;
+  	ambaFakeParams->clock = clk1.value();
 	AmbaFake * sp810_fake = ambaFakeParams->create();
 	objects.push_back((SimObject*)sp810_fake);
 
@@ -1058,23 +1030,25 @@ void CortexA15::before_end_of_elaboration()
 	ambaFakeParams->pio_latency = clk1.value();//1000;
 	ambaFakeParams->amba_id = 0;
 	ambaFakeParams->ignore_access = false;
+  	ambaFakeParams->clock = clk1.value();
 	AmbaFake * sci_fake = ambaFakeParams->create();
 	objects.push_back((SimObject*)sci_fake);
 
-	GicParams * gicParams = new GicParams();
-	gicParams->name=std::string(name())+".realview.gic";
-	gicParams->platform=(Platform*)rv;
+	Pl390Params * pl390Params = new Pl390Params();
+	pl390Params->name=std::string(name())+".realview.gic";
+	pl390Params->platform=(Platform*)rv;
 	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
-		gicParams->system=linuxCortexA15;
+		pl390Params->system=linuxCortexA15;
 	else
-		gicParams->system = cortexA15;
-    gicParams->it_lines = 128;
-    gicParams->dist_addr = 0x1f001000;
-    gicParams->cpu_pio_delay = 10*clk1.value();//10000;
-    gicParams->dist_pio_delay = 10*clk1.value();//10000;
-    gicParams->cpu_addr = 0x1f000100;
-    gicParams->int_latency = 10*clk1.value();//10000;
-	Gic * gic = gicParams->create();
+		pl390Params->system = cortexA15;
+    pl390Params->it_lines = 128;
+    pl390Params->dist_addr = 0x1f001000;
+    pl390Params->cpu_pio_delay = 10*clk1.value();//10000;
+    pl390Params->dist_pio_delay = 10*clk1.value();//10000;
+    pl390Params->cpu_addr = 0x1f000100;
+    pl390Params->int_latency = 10*clk1.value();//10000;
+    pl390Params->clock = clk1.value();
+	Pl390 * gic = pl390Params->create();
 	objects.push_back((SimObject*)gic);
 	
 	CpuLocalTimerParams * cpuLocalTimerParams = new CpuLocalTimerParams();
@@ -1085,7 +1059,7 @@ void CortexA15::before_end_of_elaboration()
 		cpuLocalTimerParams->system = cortexA15;
 	cpuLocalTimerParams->pio_addr = 0x1f000600;
     cpuLocalTimerParams->pio_latency = clk1.value();//1000;
-  	cpuLocalTimerParams->gic = gic;
+  	cpuLocalTimerParams->gic = (BaseGic*)gic;
 	cpuLocalTimerParams->int_num_timer = 29;
 	cpuLocalTimerParams->int_num_watchdog = 30;
 	cpuLocalTimerParams->clock = clk1.value();//1000;
@@ -1147,6 +1121,7 @@ void CortexA15::before_end_of_elaboration()
     ideControllerParams->InterruptLine = 31;
     ideControllerParams->io_shift = 1;
     ideControllerParams->ctrl_offset = 2;
+    ideControllerParams->clock = clk1.value();
 	IdeController * cf_ctrl = ideControllerParams->create();
 	objects.push_back((SimObject*)cf_ctrl);
 
@@ -1163,7 +1138,8 @@ void CortexA15::before_end_of_elaboration()
     sp804Params->clock1 = 1000000;
     sp804Params->int_num0 = 37; 
     sp804Params->int_num1 = 37;
-    sp804Params->gic = gic;
+    sp804Params->clock = clk1.value();
+    sp804Params->gic = (BaseGic*)gic;
 	Sp804 * timer1 = sp804Params->create();
 	objects.push_back((SimObject*)timer1);
 
@@ -1180,7 +1156,8 @@ void CortexA15::before_end_of_elaboration()
     sp804Params->clock1 = 1000000;
     sp804Params->int_num0 = 36; 
     sp804Params->int_num1 = 36;
-    sp804Params->gic = gic;
+    sp804Params->clock = clk1.value();
+    sp804Params->gic = (BaseGic*)gic;
 	Sp804 * timer0 = sp804Params->create();
 	objects.push_back((SimObject*)timer0);
 	
@@ -1200,10 +1177,11 @@ void CortexA15::before_end_of_elaboration()
 		pl050Params->pio_latency = 1000;
 		pl050Params->amba_id = 1314896;
 		pl050Params->int_num = 53;
-		pl050Params->gic = gic;
+		pl050Params->gic = (BaseGic*)gic;
 		pl050Params->int_delay = 1000*clk1.value();//1000000;
 		pl050Params->is_mouse = true;
 		pl050Params->vnc = (VncInput*) vncserver;
+        pl050Params->clock = clk1.value();
 		kmi1 = pl050Params->create();
 		objects.push_back((SimObject*)kmi1);
 
@@ -1214,9 +1192,10 @@ void CortexA15::before_end_of_elaboration()
 		pl050Params->pio_latency = 1000;
 		pl050Params->amba_id = 1314896;
 		pl050Params->int_num = 52;
-		pl050Params->gic = gic;
+		pl050Params->gic = (BaseGic*)gic;
 		pl050Params->int_delay = 1000*clk1.value();//1000000;
 		pl050Params->is_mouse = false;
+        pl050Params->clock = clk1.value();
 		pl050Params->vnc = (VncInput*)vncserver;
 		kmi0 = pl050Params->create();
 		objects.push_back((SimObject*)kmi0);
@@ -1228,7 +1207,7 @@ void CortexA15::before_end_of_elaboration()
 		pl111Params->pio_addr = 0x10020000;
 		pl111Params->pio_latency = 10*clk1.value();//10000;
 		pl111Params->amba_id = 1315089,
-		pl111Params->gic = gic;
+		pl111Params->gic = (BaseGic*)gic;
 		pl111Params->vnc = (VncInput*)vncserver;
 		pl111Params->clock = 41667;
 		clcd = pl111Params->create();
@@ -1246,6 +1225,7 @@ void CortexA15::before_end_of_elaboration()
   	realViewCtrlParams->proc_id0 = 201326592; 
   	realViewCtrlParams->proc_id1 = 201327138;
   	realViewCtrlParams->idreg = 0;
+    realViewCtrlParams->clock = clk1.value();
 	RealViewCtrl * realview_io = realViewCtrlParams->create();
 	objects.push_back((SimObject*)realview_io);
 	
@@ -1269,6 +1249,7 @@ void CortexA15::before_end_of_elaboration()
 	ExeTracerParams * traceParams;
 	OpDescParams * opdescParams;
 	ArmInterruptsParams * intParams;
+    ArmISAParams * armISAParams;
 
 	Terminal* term[MAX_CORES];
 	Pl011 * uart[MAX_CORES];
@@ -1279,22 +1260,10 @@ void CortexA15::before_end_of_elaboration()
 	FUDesc * O3v7a_Load[MAX_CORES];
 	FUDesc * O3v7a_Store[MAX_CORES];
 	OpDesc * opdesc;
-#ifdef USE_A15
 	FUDesc * O3v7a_CX[MAX_CORES];
 	FUDesc * O3v7a_MX[MAX_CORES];
 	FUDesc * O3v7a_IX[MAX_CORES];
 	FUPool * O3v7a_FUP[MAX_CORES];
-#else
-	FUDesc * FUList0[MAX_CORES];
-	FUDesc * FUList1[MAX_CORES];
-	FUDesc * FUList2[MAX_CORES];
-	FUDesc * FUList3[MAX_CORES];
-	FUDesc * FUList4[MAX_CORES];
-	FUDesc * FUList5[MAX_CORES];
-	FUDesc * FUList6[MAX_CORES];
-	FUDesc * FUList7[MAX_CORES];
-	FUDesc * FUList8[MAX_CORES];
-#endif
 	FUPool * fuPool[MAX_CORES];
 	
 	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
@@ -1335,9 +1304,10 @@ void CortexA15::before_end_of_elaboration()
 			pl011Params->pio_latency = clk1.value();//1000;
 			pl011Params->terminal = term[n];
 			pl011Params->int_num = 44+n;
-			pl011Params->gic = gic;
+			pl011Params->gic = (BaseGic*)gic;
 			pl011Params->end_on_eot = true;
 			pl011Params->int_delay = 100*clk1.value();//100000;
+            pl011Params->clock = clk1.value();
 			uart[n] = pl011Params->create();
 			objects.push_back((SimObject*)uart[n]);
 		}
@@ -1373,9 +1343,10 @@ void CortexA15::before_end_of_elaboration()
 			pl011Params->pio_latency = clk1.value();//1000;
 			pl011Params->terminal = term[n];
 			pl011Params->int_num = 44+n;
-			pl011Params->gic = gic;
+			pl011Params->gic = (BaseGic*)gic;
 			pl011Params->end_on_eot = true;
 			pl011Params->int_delay = 100*clk1.value();//100000;
+            pl011Params->clock = clk1.value();
 			uart[n] = pl011Params->create();
 			objects.push_back((SimObject*)uart[n]);
 		}
@@ -1447,7 +1418,6 @@ void CortexA15::before_end_of_elaboration()
 		baseCacheParams->assoc = 4;
 		baseCacheParams->block_size = 64;
 		baseCacheParams->forward_snoops = false;
-		baseCacheParams->hash_delay = Cycles(1);
 		baseCacheParams->is_top_level = true;
 		baseCacheParams->hit_latency = Cycles(4);//4000;
 		baseCacheParams->response_latency = Cycles(4);//4000;
@@ -1455,16 +1425,12 @@ void CortexA15::before_end_of_elaboration()
 		baseCacheParams->mshrs = 6;
 		baseCacheParams->prefetch_on_access = false;
 		baseCacheParams->prefetcher = NULL;
-		baseCacheParams->prioritizeRequests = false;
-		baseCacheParams->repl = NULL;
 		baseCacheParams->size = 8*1024; // 512 entries, 4 ways, 32bit descriptors
-		baseCacheParams->subblock_size = 0;
 		if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
 			baseCacheParams->system=linuxCortexA15;
 		else
 			baseCacheParams->system = cortexA15;
 		baseCacheParams->tgts_per_mshr = 8;
-		baseCacheParams->trace_addr = 0;
 		baseCacheParams->two_queue = false;
 		baseCacheParams->write_buffers = 16; // ????
 		baseCacheParams->clock  = clk1.value();
@@ -1485,10 +1451,28 @@ void CortexA15::before_end_of_elaboration()
 		interrupts[n] = intParams->create();
 		objects.push_back((SimObject*)interrupts[n]);
 			
-
+        //ISA
+        
+        armISAParams = new ArmISAParams();
+        armISAParams->name=std::string(name())+".cpu"+ss.str()+".isa";
+        armISAParams->fpsid=1090793632;
+        armISAParams->id_isar0=34607377;
+        armISAParams->id_isar1=34677009;
+        armISAParams->id_isar2=555950401;
+        armISAParams->id_isar3=17899825;
+        armISAParams->id_isar4=268501314;
+        armISAParams->id_isar5=0;
+        armISAParams->id_mmfr0=3;
+        armISAParams->id_mmfr1=0;
+        armISAParams->id_mmfr2=19070976;
+        armISAParams->id_mmfr3=4027589137;
+        armISAParams->id_pfr0=49;
+        armISAParams->id_pfr1=1;
+        armISAParams->midr=890224640;
+        isa[n] = armISAParams->create();
+        objects.push_back((SimObject*)isa[n]);
+        
 		// Instructions
-
-#ifdef USE_A15
 
 		opdescParams= new OpDescParams();
 		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList0.opList";
@@ -1790,378 +1774,28 @@ void CortexA15::before_end_of_elaboration()
 		O3v7a_FUP[n] = fupoolParams->create();
 		objects.push_back((SimObject*)O3v7a_FUP[n]);
 
-#else
-
-		FUDescParams* fudescParams = new FUDescParams();
-		fudescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList0";
-		fudescParams->count=6;
-
-		opdescParams= new OpDescParams();
-		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList0.opList";
-		opdescParams->issueLat = Cycles(1);
-		opdescParams->opLat = Cycles(1);
-		opdescParams->opClass = Enums::IntAlu;
-		opdesc=opdescParams->create();
-		objects.push_back((SimObject*)opdesc);
-		fudescParams->opList.push_back(opdesc);
-		
-		FUList0[n] = fudescParams->create();
-		objects.push_back((SimObject*)FUList0[n]);
-
-		fudescParams = new FUDescParams();
-		fudescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList1";
-		fudescParams->count=2;
-
-		opdescParams= new OpDescParams();
-		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList1.opList0";
-		opdescParams->issueLat = Cycles(1);
-		opdescParams->opLat = Cycles(3);
-		opdescParams->opClass = Enums::IntMult;
-		opdesc=opdescParams->create();
-		objects.push_back((SimObject*)opdesc);
-		fudescParams->opList.push_back(opdesc);
-
-		opdescParams= new OpDescParams();
-		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList1.opList1";
-		opdescParams->issueLat = Cycles(1)9;
-		opdescParams->opLat = Cycles(2)0;
-		opdescParams->opClass = Enums::IntDiv;
-		opdesc=opdescParams->create();
-		objects.push_back((SimObject*)opdesc);
-		fudescParams->opList.push_back(opdesc);
-		
-		FUList1[n] = fudescParams->create();
-		objects.push_back((SimObject*)FUList1[n]);		
-
-		fudescParams = new FUDescParams();
-		fudescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList2";
-		fudescParams->count=4;
-
-		opdescParams= new OpDescParams();
-		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList2.opList0";
-		opdescParams->issueLat = Cycles(1);
-		opdescParams->opLat = Cycles(2);
-		opdescParams->opClass = Enums::FloatAdd;
-		opdesc=opdescParams->create();
-		objects.push_back((SimObject*)opdesc);
-		fudescParams->opList.push_back(opdesc);
-		opdescParams= new OpDescParams();
-		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList2.opList1";
-		opdescParams->issueLat = Cycles(1);
-		opdescParams->opLat = Cycles(2);
-		opdescParams->opClass = Enums::FloatCmp;
-		opdesc=opdescParams->create();
-		objects.push_back((SimObject*)opdesc);
-		fudescParams->opList.push_back(opdesc);
-		opdescParams= new OpDescParams();
-		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList2.opList2";
-		opdescParams->issueLat = Cycles(1);
-		opdescParams->opLat = Cycles(2);
-		opdescParams->opClass = Enums::FloatCvt;
-		opdesc=opdescParams->create();
-		objects.push_back((SimObject*)opdesc);
-		fudescParams->opList.push_back(opdesc);
-		
-		FUList2[n] = fudescParams->create();
-		objects.push_back((SimObject*)FUList2[n]);
-		
-		fudescParams = new FUDescParams();
-		fudescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList3";
-		fudescParams->count=2;
-		
-		opdescParams= new OpDescParams();
-		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList3.opList0";
-		opdescParams->issueLat = Cycles(1);
-		opdescParams->opLat = Cycles(4);
-		opdescParams->opClass = Enums::FloatMult;
-		opdesc=opdescParams->create();
-		objects.push_back((SimObject*)opdesc);
-		fudescParams->opList.push_back(opdesc);
-		opdescParams= new OpDescParams();
-		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList3.opList1";
-		opdescParams->issueLat = Cycles(1)2;
-		opdescParams->opLat = Cycles(1)2;
-		opdescParams->opClass = Enums::FloatDiv;
-		opdesc=opdescParams->create();
-		objects.push_back((SimObject*)opdesc);
-		fudescParams->opList.push_back(opdesc);
-		opdescParams= new OpDescParams();
-		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList3.opList2";
-		opdescParams->issueLat = 24;
-		opdescParams->opLat = Cycles(2)4;
-		opdescParams->opClass = Enums::FloatSqrt;
-		opdesc=opdescParams->create();
-		objects.push_back((SimObject*)opdesc);
-		fudescParams->opList.push_back(opdesc);
-		
-		FUList3[n] = fudescParams->create();
-		objects.push_back((SimObject*)FUList3[n]);
-
-		fudescParams = new FUDescParams();
-		fudescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList4";
-		fudescParams->count=0;
-		
-		opdescParams= new OpDescParams();
-		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList4.opList";
-		opdescParams->issueLat = Cycles(1);
-		opdescParams->opLat = Cycles(1);
-		opdescParams->opClass = Enums::MemRead;
-		opdesc=opdescParams->create();
-		objects.push_back((SimObject*)opdesc);
-		
-		FUList4[n] = fudescParams->create();
-		objects.push_back((SimObject*)FUList4[n]);
-		fudescParams->opList.push_back(opdesc);
-
-		fudescParams = new FUDescParams();
-		fudescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList5";
-		fudescParams->count=4;
-		
-		opdescParams= new OpDescParams();
-		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList5.opList00";
-		opdescParams->issueLat = Cycles(1);
-		opdescParams->opLat = Cycles(1);
-		opdescParams->opClass = Enums::SimdAdd;
-		opdesc=opdescParams->create();
-		objects.push_back((SimObject*)opdesc);
-		fudescParams->opList.push_back(opdesc);
-		opdescParams= new OpDescParams();
-		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList5.opList01";
-		opdescParams->issueLat = Cycles(1);
-		opdescParams->opLat = Cycles(1);
-		opdescParams->opClass = Enums::SimdAddAcc;
-		opdesc=opdescParams->create();
-		objects.push_back((SimObject*)opdesc);
-		fudescParams->opList.push_back(opdesc);
-		opdescParams= new OpDescParams();
-		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList5.opList02";
-		opdescParams->issueLat = Cycles(1);
-		opdescParams->opLat = Cycles(1);
-		opdescParams->opClass = Enums::SimdAlu;
-		opdesc=opdescParams->create();
-		objects.push_back((SimObject*)opdesc);
-		fudescParams->opList.push_back(opdesc);
-		opdescParams= new OpDescParams();
-		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList5.opList03";
-		opdescParams->issueLat = Cycles(1);
-		opdescParams->opLat = Cycles(1);
-		opdescParams->opClass = Enums::SimdCmp;
-		opdesc=opdescParams->create();
-		objects.push_back((SimObject*)opdesc);
-		fudescParams->opList.push_back(opdesc);
-		opdescParams= new OpDescParams();
-		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList5.opList04";
-		opdescParams->issueLat = Cycles(1);
-		opdescParams->opLat = Cycles(1);
-		opdescParams->opClass = Enums::SimdCvt;
-		opdesc=opdescParams->create();
-		objects.push_back((SimObject*)opdesc);
-		fudescParams->opList.push_back(opdesc);
-		opdescParams= new OpDescParams();
-		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList5.opList05";
-		opdescParams->issueLat = Cycles(1);
-		opdescParams->opLat = Cycles(1);
-		opdescParams->opClass = Enums::SimdMisc;
-		opdesc=opdescParams->create();
-		objects.push_back((SimObject*)opdesc);
-		fudescParams->opList.push_back(opdesc);
-		opdescParams= new OpDescParams();
-		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList5.opList06";
-		opdescParams->issueLat = Cycles(1);
-		opdescParams->opLat = Cycles(1);
-		opdescParams->opClass = Enums::SimdMult;
-		opdesc=opdescParams->create();
-		objects.push_back((SimObject*)opdesc);
-		fudescParams->opList.push_back(opdesc);
-		opdescParams= new OpDescParams();
-		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList5.opList07";
-		opdescParams->issueLat = Cycles(1);
-		opdescParams->opLat = Cycles(1);
-		opdescParams->opClass = Enums::SimdMultAcc;
-		opdesc=opdescParams->create();
-		objects.push_back((SimObject*)opdesc);
-		fudescParams->opList.push_back(opdesc);
-		opdescParams= new OpDescParams();
-		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList5.opList08";
-		opdescParams->issueLat = Cycles(1);
-		opdescParams->opLat = Cycles(1);
-		opdescParams->opClass = Enums::SimdShift;
-		opdesc=opdescParams->create();
-		objects.push_back((SimObject*)opdesc);
-		fudescParams->opList.push_back(opdesc);
-		opdescParams= new OpDescParams();
-		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList5.opList09";
-		opdescParams->issueLat = Cycles(1);
-		opdescParams->opLat = Cycles(1);
-		opdescParams->opClass = Enums::SimdShiftAcc;
-		opdesc=opdescParams->create();
-		objects.push_back((SimObject*)opdesc);
-		fudescParams->opList.push_back(opdesc);
-		opdescParams= new OpDescParams();
-		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList5.opList10";
-		opdescParams->issueLat = Cycles(1);
-		opdescParams->opLat = Cycles(1);
-		opdescParams->opClass = Enums::SimdSqrt;
-		opdesc=opdescParams->create();
-		objects.push_back((SimObject*)opdesc);
-		fudescParams->opList.push_back(opdesc);
-		opdescParams= new OpDescParams();
-		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList5.opList11";
-		opdescParams->issueLat = Cycles(1);
-		opdescParams->opLat = Cycles(1);
-		opdescParams->opClass = Enums::SimdFloatAdd;
-		opdesc=opdescParams->create();
-		objects.push_back((SimObject*)opdesc);
-		fudescParams->opList.push_back(opdesc);
-		opdescParams= new OpDescParams();
-		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList5.opList12";
-		opdescParams->issueLat = Cycles(1);
-		opdescParams->opLat = Cycles(1);
-		opdescParams->opClass = Enums::SimdFloatAlu;
-		opdesc=opdescParams->create();
-		objects.push_back((SimObject*)opdesc);
-		fudescParams->opList.push_back(opdesc);
-		opdescParams= new OpDescParams();
-		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList5.opList13";
-		opdescParams->issueLat = Cycles(1);
-		opdescParams->opLat = Cycles(1);
-		opdescParams->opClass = Enums::SimdFloatCmp;
-		opdesc=opdescParams->create();
-		objects.push_back((SimObject*)opdesc);
-		fudescParams->opList.push_back(opdesc);
-		opdescParams= new OpDescParams();
-		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList5.opList14";
-		opdescParams->issueLat = Cycles(1);
-		opdescParams->opLat = Cycles(1);
-		opdescParams->opClass = Enums::SimdFloatCvt;
-		opdesc=opdescParams->create();
-		objects.push_back((SimObject*)opdesc);
-		fudescParams->opList.push_back(opdesc);
-		opdescParams= new OpDescParams();
-		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList5.opList15";
-		opdescParams->issueLat = Cycles(1);
-		opdescParams->opLat = Cycles(1);
-		opdescParams->opClass = Enums::SimdFloatDiv;
-		opdesc=opdescParams->create();
-		objects.push_back((SimObject*)opdesc);
-		fudescParams->opList.push_back(opdesc);
-		opdescParams= new OpDescParams();
-		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList5.opList16";
-		opdescParams->issueLat = Cycles(1);
-		opdescParams->opLat = Cycles(1);
-		opdescParams->opClass = Enums::SimdFloatMisc;
-		opdesc=opdescParams->create();
-		objects.push_back((SimObject*)opdesc);
-		fudescParams->opList.push_back(opdesc);
-		opdescParams= new OpDescParams();
-		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList5.opList17";
-		opdescParams->issueLat = Cycles(1);
-		opdescParams->opLat = Cycles(1);
-		opdescParams->opClass = Enums::SimdFloatMult;
-		opdesc=opdescParams->create();
-		objects.push_back((SimObject*)opdesc);
-		fudescParams->opList.push_back(opdesc);
-		opdescParams= new OpDescParams();
-		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList5.opList18";
-		opdescParams->issueLat = Cycles(1);
-		opdescParams->opLat = Cycles(1);
-		opdescParams->opClass = Enums::SimdFloatMultAcc;
-		opdesc=opdescParams->create();
-		objects.push_back((SimObject*)opdesc);
-		fudescParams->opList.push_back(opdesc);
-		opdescParams= new OpDescParams();
-		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList5.opList19";
-		opdescParams->issueLat = Cycles(1);
-		opdescParams->opLat = Cycles(1);
-		opdescParams->opClass = Enums::SimdFloatSqrt;
-		opdesc=opdescParams->create();
-		objects.push_back((SimObject*)opdesc);
-		fudescParams->opList.push_back(opdesc);
-		
-		FUList5[n] = fudescParams->create();
-		objects.push_back((SimObject*)FUList5[n]);
-		fudescParams->opList.push_back(opdesc);
-
-		fudescParams = new FUDescParams();
-		fudescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList6";
-		fudescParams->count=0;
-		
-		opdescParams= new OpDescParams();
-		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList6.opList";
-		opdescParams->issueLat = Cycles(1);
-		opdescParams->opLat = Cycles(1);
-		opdescParams->opClass = Enums::MemWrite;
-		opdesc=opdescParams->create();
-		objects.push_back((SimObject*)opdesc);
-		fudescParams->opList.push_back(opdesc);
-
-		FUList6[n] = fudescParams->create();
-		objects.push_back((SimObject*)FUList6[n]);
-		fudescParams->opList.push_back(opdesc);
-
-		fudescParams = new FUDescParams();
-		fudescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList7";
-		fudescParams->count=4;
-		
-		opdescParams= new OpDescParams();
-		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList7.opList0";
-		opdescParams->issueLat = Cycles(1);
-		opdescParams->opLat = Cycles(1);
-		opdescParams->opClass = Enums::MemRead;
-		opdesc=opdescParams->create();
-		objects.push_back((SimObject*)opdesc);
-		fudescParams->opList.push_back(opdesc);
-
-		opdescParams= new OpDescParams();
-		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList7.opList1";
-		opdescParams->issueLat = Cycles(1);
-		opdescParams->opLat = Cycles(1);
-		opdescParams->opClass = Enums::MemWrite;
-		opdesc=opdescParams->create();
-		objects.push_back((SimObject*)opdesc);
-		fudescParams->opList.push_back(opdesc);
-
-		FUList7[n] = fudescParams->create();
-		objects.push_back((SimObject*)FUList7[n]);
-		fudescParams->opList.push_back(opdesc);
-
-		fudescParams = new FUDescParams();
-		fudescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList8";
-		fudescParams->count=1;
-		
-		opdescParams= new OpDescParams();
-		opdescParams->name=std::string(name())+".cpu"+ss.str()+".fuPool.FUList8.opList";
-		opdescParams->issueLat = 3;
-		opdescParams->opLat = Cycles(3);
-		opdescParams->opClass = Enums::IprAccess;
-		opdesc=opdescParams->create();
-		objects.push_back((SimObject*)opdesc);
-		fudescParams->opList.push_back(opdesc);
-
-		FUList8[n] = fudescParams->create();
-		objects.push_back((SimObject*)FUList8[n]);
-		fudescParams->opList.push_back(opdesc);
-		
-		FUPoolParams * fupoolParams = new FUPoolParams();
-		fupoolParams->name=std::string(name())+".cpu"+ss.str()+".fuPool";
-		fupoolParams->FUList.push_back(FUList0[n]);
-		fupoolParams->FUList.push_back(FUList1[n]);
-		fupoolParams->FUList.push_back(FUList2[n]);
-		fupoolParams->FUList.push_back(FUList3[n]);
-		fupoolParams->FUList.push_back(FUList4[n]);
-		fupoolParams->FUList.push_back(FUList5[n]);
-		fupoolParams->FUList.push_back(FUList6[n]);
-		fupoolParams->FUList.push_back(FUList7[n]);
-		fupoolParams->FUList.push_back(FUList8[n]);
-		fuPool[n] = fupoolParams->create();
-		objects.push_back((SimObject*)fuPool[n]);
-
-#endif
+        BranchPredictorParams * branchpredParams = new BranchPredictorParams();
+        branchpredParams->name= std::string(name())+".cpu"+ss.str()+".branchPred";
+        branchpredParams->choiceCtrBits=2;
+        branchpredParams->BTBEntries=2048;
+        branchpredParams->globalCtrBits=2;
+        branchpredParams->numThreads=1;
+        branchpredParams->choicePredictorSize=8192;
+        branchpredParams->instShiftAmt=2;
+        branchpredParams->localCtrBits=2;
+        branchpredParams->localHistoryBits=6;
+        branchpredParams->BTBTagSize=18;
+        branchpredParams->globalHistoryBits=13;
+        branchpredParams->localHistoryTableSize=64;
+        branchpredParams->localPredictorSize=2048;
+        branchpredParams->predType="tournament";
+        branchpredParams->RASSize=16;
+        branchpredParams->globalPredictorSize=8192;
+        bpred[n] = branchpredParams->create();
+        objects.push_back((SimObject*)bpred[n]);
 
 		//CPU
 		
-		
-#ifdef USE_A15
 		
 		cpuParams = new DerivO3CPUParams();
 		cpuParams->interrupts=interrupts[n];
@@ -2172,13 +1806,13 @@ void CortexA15::before_end_of_elaboration()
 		if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
 		{
 			cpuParams->system=linuxCortexA15;
-			cpuParams->defer_registration=true;
+			cpuParams->switched_out=true;
 			cpuParams->cpu_id = n+_num_cores;
 		}
 		else
 		{
 			cpuParams->system=cortexA15;
-			cpuParams->defer_registration = false;
+			cpuParams->switched_out = false;
 			cpuParams->cpu_id = n;
 		}
 		cpuParams->clock=clk1.value();//1000;
@@ -2188,7 +1822,6 @@ void CortexA15::before_end_of_elaboration()
 		cpuParams->LSQDepCheckShift = 0;
 		cpuParams->activity = 0;
 		cpuParams->smtLSQThreshold = 100;
-		cpuParams->BTBEntries = 2048; 
 		cpuParams->dispatchWidth = 6;
 		cpuParams->iewToRenameDelay = Cycles(1);
 		cpuParams->numROBEntries = 40;
@@ -2205,44 +1838,32 @@ void CortexA15::before_end_of_elaboration()
 		cpuParams->fetchToDecodeDelay = Cycles(3);
 		cpuParams->issueWidth = 8;
 		cpuParams->LSQCheckLoads = true;
-		cpuParams->globalCtrBits = 2;
 		cpuParams->commitToRenameDelay = Cycles(1);
-		cpuParams->choicePredictorSize = 8192;
 		cpuParams->cachePorts = 200;
 		cpuParams->renameToDecodeDelay = Cycles(1);
 		cpuParams->smtFetchPolicy = "SingleThread";
 		cpuParams->store_set_clear_period = 250*clk1.value();//250000;
 		cpuParams->numPhysFloatRegs = 128;
 		cpuParams->numPhysIntRegs = 128;
-		cpuParams->RASSize = 16;
 		cpuParams->wbDepth = 1;
 		cpuParams->issueToExecuteDelay = Cycles(1);
-		cpuParams->predType = "tournament";
 		cpuParams->smtROBThreshold = 100;
 		cpuParams->smtNumFetchingThreads = 1;
 		cpuParams->wbWidth = 8;
 		cpuParams->commitToFetchDelay = Cycles(1);
 		cpuParams->fetchTrapLatency = Cycles(1);
 		cpuParams->fuPool = O3v7a_FUP[n]; 
-		cpuParams->localHistoryTableSize = 64;
 		cpuParams->decodeToFetchDelay = Cycles(1);
 		cpuParams->renameToFetchDelay = Cycles(1);
 		cpuParams->decodeWidth = 3;
 		cpuParams->trapLatency = Cycles(13);
 		cpuParams->smtIQPolicy = "Partitioned";
-		cpuParams->globalHistoryBits = 13;
 		cpuParams->smtROBPolicy = "Partitioned";
-		cpuParams->localPredictorSize = 64;
-		cpuParams->choiceCtrBits = 2;
 		cpuParams->numRobs = 1;
-		cpuParams->localHistoryBits = 6;
 		cpuParams->iewToDecodeDelay = Cycles(1);
 		cpuParams->smtLSQPolicy = "Partitioned";
 		cpuParams->commitWidth = 8;
-		cpuParams->globalPredictorSize = 8192;
-		cpuParams->localCtrBits = 2;
 		cpuParams->forwardComSize = 5;
-		cpuParams->BTBTagSize = 18;
 		cpuParams->numIQEntries = 32;
 		cpuParams->LFSTSize = 1024;
 		cpuParams->iewToCommitDelay = Cycles(1);
@@ -2260,124 +1881,22 @@ void CortexA15::before_end_of_elaboration()
 		cpuParams->progress_interval = 0;
 		cpuParams->max_loads_any_thread = 0;
 		cpuParams->max_insts_any_thread = 0;
+        cpuParams->isa.push_back(isa[n]);
+        cpuParams->branchPred=bpred[n];
 		cpu[n] = (BaseO3CPU*)cpuParams->create();
 		((BaseCPU*)cpu[n])->setClusterId(_cluster_id_cfg);
 		cpus[cpuParams->name]=(FullO3CPU<O3CPUImpl>*)cpu[n];
 		//objects.push_back((SimObject*)cpu[n]);
 		
-#else
 
-		cpuParams = new DerivO3CPUParams();
-		cpuParams->interrupts=interrupts[n];
-		cpuParams->name=std::string(name())+".cpu"+ss.str();
-		cpuParams->itb=itlb[n];
-		cpuParams->dtb=dtlb[n];
-		cpuParams->tracer=tracer[n];
-		if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
-			cpuParams->system=linuxCortexA15;
-		else
-			cpuParams->system=cortexA15;
-		cpuParams->clock=clk1.value();//1000;
-		cpuParams->cpu_id = n;
-		cpuParams->BTBEntries=4096;
-		cpuParams->BTBTagSize=16;
-		cpuParams->LFSTSize=1024;
-		cpuParams->LQEntries=32;
-		cpuParams->LSQCheckLoads=true;
-		cpuParams->LSQDepCheckShift=4;
-		cpuParams->RASSize=16;
-		cpuParams->SQEntries=32;
-		cpuParams->SSITSize=1024;
-		cpuParams->activity=0;
-		cpuParams->backComSize=5;
-		cpuParams->cachePorts=200;
-		cpuParams->checker=NULL;
-		cpuParams->choiceCtrBits=2;
-		cpuParams->choicePredictorSize=8192;
-		cpuParams->commitToDecodeDelay=1;
-		cpuParams->commitToFetchDelay=1;
-		cpuParams->commitToIEWDelay=1;
-		cpuParams->commitToRenameDelay=1;
-		cpuParams->commitWidth=8;
-		cpuParams->decodeToFetchDelay=1;
-		cpuParams->decodeToRenameDelay=1;
-		cpuParams->decodeWidth=8;
-		cpuParams->defer_registration=false;
-		cpuParams->dispatchWidth=8;
-		cpuParams->do_checkpoint_insts=true;
-		cpuParams->do_quiesce=true;
-		cpuParams->do_statistics_insts=true;
-		cpuParams->fetchToDecodeDelay=1;
-		cpuParams->fetchTrapLatency=1;
-		cpuParams->fetchWidth=8;
-		cpuParams->forwardComSize=5;
-		cpuParams->fuPool= fuPool[n];
-		cpuParams->function_trace=false;
-		cpuParams->function_trace_start=0;
-		cpuParams->globalCtrBits=2;
-		cpuParams->globalHistoryBits=13;
-		cpuParams->globalPredictorSize=8192;
-		cpuParams->iewToCommitDelay=1;
-		cpuParams->iewToDecodeDelay=1;
-		cpuParams->iewToFetchDelay=1;
-		cpuParams->iewToRenameDelay=1;
-		cpuParams->instShiftAmt=2;
-		cpuParams->issueToExecuteDelay=1;
-		cpuParams->issueWidth=8;
-		cpuParams->localCtrBits=2;
-		cpuParams->localHistoryBits=11;
-		cpuParams->localHistoryTableSize=2048;
-		cpuParams->localPredictorSize=2048;
-		cpuParams->max_insts_all_threads=0;
-		cpuParams->max_insts_any_thread=0;
-		cpuParams->max_loads_all_threads=0;
-		cpuParams->max_loads_any_thread=0;
-		cpuParams->numIQEntries=64;
-		cpuParams->numPhysFloatRegs=256;
-		cpuParams->numPhysIntRegs=256;
-		cpuParams->numROBEntries=192;
-		cpuParams->numRobs=1;
-		cpuParams->numThreads=1;
-		cpuParams->phase=0;
-		cpuParams->predType="tournament";
-		cpuParams->profile=0;
-		cpuParams->progress_interval=0;
-		cpuParams->renameToDecodeDelay=1;
-		cpuParams->renameToFetchDelay=1;
-		cpuParams->renameToIEWDelay=2;
-		cpuParams->renameToROBDelay=1;
-		cpuParams->renameWidth=8;
-		cpuParams->smtCommitPolicy="RoundRobin";
-		cpuParams->smtFetchPolicy="SingleThread";
-		cpuParams->smtIQPolicy="Partitioned";
-		cpuParams->smtIQThreshold=100;
-		cpuParams->smtLSQPolicy="Partitioned";
-		cpuParams->smtLSQThreshold=100;
-		cpuParams->smtNumFetchingThreads=1;
-		cpuParams->smtROBPolicy="Partitioned";
-		cpuParams->smtROBThreshold=100;
-		cpuParams->squashWidth=8;
-		cpuParams->store_set_clear_period=250000;
-		cpuParams->trapLatency=13;
-		cpuParams->wbDepth=1;
-		cpuParams->wbWidth=8;
-		cpu[n] = cpuParams->create();
-		cpus[cpuParams->name]=(FullO3CPU<O3CPUImpl>*)cpu[n];
-		//objects.push_back((SimObject*)cpu[n]);
-
-
-#endif
   		// Caches
   		
-#ifdef USE_A15
-
 		baseCacheParams = new BaseCacheParams();
 		baseCacheParams->name=std::string(name())+".cpu"+ss.str()+".icache";
 		baseCacheParams->addr_ranges.push_back(rb);
 		baseCacheParams->assoc = 2;
 		baseCacheParams->block_size = 64;
 		baseCacheParams->forward_snoops = true;
-		baseCacheParams->hash_delay = Cycles(1);
 		baseCacheParams->is_top_level = true;
 		baseCacheParams->hit_latency = Cycles(1);//1000;
 		baseCacheParams->response_latency = Cycles(1);//1000;
@@ -2385,16 +1904,12 @@ void CortexA15::before_end_of_elaboration()
 		baseCacheParams->mshrs = 2;
 		baseCacheParams->prefetch_on_access = false;
 		baseCacheParams->prefetcher = NULL;
-		baseCacheParams->prioritizeRequests = false;
-		baseCacheParams->repl = NULL;
 		baseCacheParams->size = 32768;
-		baseCacheParams->subblock_size = 0;
 		if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
 			baseCacheParams->system=linuxCortexA15;
 		else
 			baseCacheParams->system = cortexA15;
 		baseCacheParams->tgts_per_mshr = 8;
-		baseCacheParams->trace_addr = 0;
 		baseCacheParams->two_queue = false;
 		baseCacheParams->write_buffers = 8;
 		baseCacheParams->clock = clk1.value();
@@ -2407,7 +1922,6 @@ void CortexA15::before_end_of_elaboration()
 		baseCacheParams->assoc = 2;
 		baseCacheParams->block_size = 64;
 		baseCacheParams->forward_snoops = true;
-		baseCacheParams->hash_delay = Cycles(1);
 		baseCacheParams->is_top_level = true;
 		baseCacheParams->hit_latency = Cycles(2);//2000;
 		baseCacheParams->response_latency = Cycles(2);//2000;
@@ -2415,92 +1929,17 @@ void CortexA15::before_end_of_elaboration()
 		baseCacheParams->mshrs = 6;
 		baseCacheParams->prefetch_on_access = false;
 		baseCacheParams->prefetcher = NULL;
-		baseCacheParams->prioritizeRequests = false;
-		baseCacheParams->repl = NULL;
 		baseCacheParams->size = 32768;
-		baseCacheParams->subblock_size = 0;
 		if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
 			baseCacheParams->system=linuxCortexA15;
 		else
 			baseCacheParams->system = cortexA15;
 		baseCacheParams->tgts_per_mshr = 8;
-		baseCacheParams->trace_addr = 0;
 		baseCacheParams->two_queue = false;
 		baseCacheParams->write_buffers = 16;
 		baseCacheParams->clock = clk1.value();
 		dcache[n] = baseCacheParams->create();
 		objects.push_back((SimObject*)dcache[n]);
-
-#else
-
-		baseCacheParams = new BaseCacheParams();
-		baseCacheParams->name=std::string(name())+".cpu"+ss.str()+".icache";
-		baseCacheParams->write_buffers = 8;
-		baseCacheParams->is_top_level = true;
-		baseCacheParams->block_size = 64;
-		baseCacheParams->prefetch_latency = 10*clk1.value();//10000;
-		baseCacheParams->size = 32768;
-		baseCacheParams->latency = clk1.value();//1000;
-		baseCacheParams->prefetch_past_page = false;
-		baseCacheParams->addr_ranges.push_back(rb);
-		baseCacheParams->num_cpus = 1;
-		baseCacheParams->trace_addr = 0;
-		baseCacheParams->max_miss_count = 0;
-		baseCacheParams->mshrs = 10;
-		baseCacheParams->forward_snoops = true;
-		baseCacheParams->prefetch_data_accesses_only = false;
-		baseCacheParams->tgts_per_mshr = 20;
-		baseCacheParams->repl = 0x0;
-		baseCacheParams->assoc = 2;
-		baseCacheParams->prefetch_on_access = false;
-		baseCacheParams->prioritizeRequests = false;
-		baseCacheParams->prefetch_use_cpu_id = true;
-		baseCacheParams->prefetch_serial_squash = false;
-		baseCacheParams->prefetch_degree = 1;
-		baseCacheParams->prefetch_policy = Enums::none;
-		baseCacheParams->hash_delay = Cycles(1);
-		baseCacheParams->subblock_size = 0;
-		baseCacheParams->prefetcher_size = 100;
-		baseCacheParams->two_queue = false;
-		baseCacheParams->clock = clk1.value();
-		icache[n] = baseCacheParams->create();
-		objects.push_back((SimObject*)icache[n]);
-
-		baseCacheParams = new BaseCacheParams();
-		baseCacheParams->name=std::string(name())+".cpu"+ss.str()+".dcache";
-		baseCacheParams->write_buffers = 8;
-		baseCacheParams->is_top_level = true;
-		baseCacheParams->block_size = 64;
-		baseCacheParams->prefetch_latency = 10*clk1.value();//20000;
-		baseCacheParams->size = 65536;
-		baseCacheParams->hit_latency = Cycles(1);//2000;
-		baseCacheParams->response_latency = Cycles(1);//2000;
-		baseCacheParams->prefetch_past_page = false;
-		baseCacheParams->addr_ranges.push_back(rb);
-		baseCacheParams->num_cpus = 1;
-		baseCacheParams->trace_addr = 0;
-		baseCacheParams->max_miss_count = 0;
-		baseCacheParams->mshrs = 10;
-		baseCacheParams->forward_snoops = true;
-		baseCacheParams->prefetch_data_accesses_only = false;
-		baseCacheParams->tgts_per_mshr = 20;
-		baseCacheParams->repl = NULL;
-		baseCacheParams->assoc = 2;
-		baseCacheParams->prefetch_on_access = false;
-		baseCacheParams->prioritizeRequests = false;
-		baseCacheParams->prefetch_use_cpu_id = true;
-		baseCacheParams->prefetch_serial_squash = false;
-		baseCacheParams->prefetch_degree = 1;
-		baseCacheParams->prefetch_policy = Enums::none;
-		baseCacheParams->hash_delay = Cycles(1);
-		baseCacheParams->subblock_size = 0;
-		baseCacheParams->prefetcher_size = 100;
-		baseCacheParams->two_queue = false;
-		baseCacheParams->clock = clk1.value();
-		dcache[n] = baseCacheParams->create();
-		objects.push_back((SimObject*)dcache[n]);
-
-#endif
 
 		ncbusParams = new NoncoherentBusParams();
 		ncbusParams->name=std::string(name())+".cpu"+ss.str()+".xtb_walker_cache_bus";
@@ -2585,7 +2024,7 @@ void CortexA15::before_end_of_elaboration()
 			atomicSimpleCPUParams->checker=NULL;
 			atomicSimpleCPUParams->clock=clk1.value();
 			atomicSimpleCPUParams->cpu_id=i;
-			atomicSimpleCPUParams->defer_registration=false;
+			atomicSimpleCPUParams->switched_out=false;
 			atomicSimpleCPUParams->do_checkpoint_insts=true;
 			atomicSimpleCPUParams->do_quiesce=true;
 			atomicSimpleCPUParams->do_statistics_insts=true;

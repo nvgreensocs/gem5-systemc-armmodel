@@ -162,11 +162,11 @@ if ((build_mode == 'release') | (build_mode == 'fast')):
 
 systemc_home=os.environ['SYSTEMC_HOME']
 
-env.Append(CPPPATH=[ Dir('..'+os.sep+'amba_socket'),Dir('..'+os.sep+'amba_socket'+os.sep+'dependencies'+os.sep+'AMBA-PV'+os.sep+'include'),Dir('gem5'+os.sep+'src'),py_includes,Dir('gem5'+os.sep+'build'+os.sep+'ARM'),Dir('..'+os.sep+'greensocs'+os.sep+'include'),Dir('ArmA15'+os.sep+'include'),Dir(os.sep+'usr'+os.sep+'local'+os.sep+'systemc-2.3.0'+os.sep+'include'), Dir(systemc_home+os.sep+'include')])
+env.Append(CPPPATH=[ Dir('..'+os.sep+'amba_socket'),Dir('..'+os.sep+'amba_socket'+os.sep+'dependencies'+os.sep+'AMBA-PV'+os.sep+'include'),Dir('gem5'+os.sep+'src'),py_includes,Dir('gem5'+os.sep+'sysc_build'+os.sep+'ARM'),Dir('..'+os.sep+'greensocs'+os.sep+'include'),Dir('ArmA15'+os.sep+'include'),Dir(os.sep+'usr'+os.sep+'local'+os.sep+'systemc-2.3.0'+os.sep+'include'), Dir(systemc_home+os.sep+'include')])
 
 # setting defines
 
-env.Append(CPPDEFINES=['SC_USE_STD_STRING','__SPIRIT_COMPLIANT__','SC_INCLUDE_DYNAMIC_PROCESSES','SYSTEMC','CBA_IF','SC_USE_DYNAMIC_PROCESSES',('DATECODE','now'),('USERID','user'),'GREENSOCS',('HIDE_ME','false'),('BOOST_FILESYSTEM_VERSION','3')])
+env.Append(CPPDEFINES=['SC_USE_STD_STRING','__SPIRIT_COMPLIANT__','SC_INCLUDE_DYNAMIC_PROCESSES','SYSTEMC','CBA_IF','SC_USE_DYNAMIC_PROCESSES',('DATECODE','now'),('USERID','user'),'GREENSOCS',('HIDE_ME','false'),('BOOST_FILESYSTEM_VERSION','3'),'_SYSTEMC_'])
 
 # cgem defines
 

@@ -66,7 +66,7 @@ Description:
 #include "params/NoncoherentBus.hh"
 #include "params/IsaFake.hh"
 #include "params/A9SCU.hh"
-#include "params/Gic.hh"
+#include "params/Pl390.hh"
 #include "params/CpuLocalTimer.hh"
 #include "params/IdeController.hh"
 #include "params/RawDiskImage.hh"
@@ -78,13 +78,13 @@ Description:
 #include "params/Pl111.hh"
 #include "params/BaseCache.hh"
 #include "params/StridePrefetcher.hh"
+#include "params/BranchPredictor.hh"
+#include "params/ArmISA.hh"
 #include "python/swig/pyobject.hh"
 
 #include <greencontrol/config.h>
 
-#include "gem5_event_queue.hpp"
 #include "bridge_classic_to_ambatlm2.hpp"
-#include "nerios_arm_system.hpp"
 
 /*************** macros definition ***************/
 //waiting for a better place
@@ -147,9 +147,11 @@ private:
 	ArmISA::TLB * itlb[MAX_CORES];
 	Trace::ExeTracer * tracer[MAX_CORES];
 	ArmISA::Interrupts * interrupts[MAX_CORES];
+    ArmISA::ISA * isa[MAX_CORES];
 	BaseCache * icache[MAX_CORES];
 	BaseCache * dcache[MAX_CORES];
 	BaseCache * xtb_walker_cache[MAX_CORES];
+    BPredUnit * bpred[MAX_CORES];
 	NoncoherentBus * xtb_walker_cache_bus[MAX_CORES];
 
 	sc_core::sc_event   switch_cpus_evt;

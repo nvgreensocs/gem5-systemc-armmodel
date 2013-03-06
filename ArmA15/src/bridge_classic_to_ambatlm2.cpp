@@ -133,6 +133,7 @@ void BridgeClassicToAMBATLM2<BUSWIDTH>::send_dummy_response()
 {
 	setCurTick(sc_core::sc_time_stamp().value());
 	dummy_pkt.front()->makeTimingResponse();
+    dummy_pkt.front()->busFirstWordDelay = dummy_pkt.front()->busLastWordDelay = 0;
 	if (bus_stalling)
 	{
 		retryQueue.push(dummy_pkt.front());
@@ -397,6 +398,7 @@ tlm::tlm_sync_enum BridgeClassicToAMBATLM2<BUSWIDTH>::nb_bw_transport(tlm::tlm_g
 						}
 					}
 				  setCurTick(sc_core::sc_time_stamp().value());
+                  wr_packets[m_id->value]->busFirstWordDelay = wr_packets[m_id->value]->busLastWordDelay = 0;
 				  if (bus_stalling)
 					  retryQueue.push(wr_packets[m_id->value]);
 				  else if (!slavePort->sendTimingResp(wr_packets[m_id->value]))
@@ -437,6 +439,7 @@ tlm::tlm_sync_enum BridgeClassicToAMBATLM2<BUSWIDTH>::nb_bw_transport(tlm::tlm_g
 //						pkt->req->setExtraData(1);
 //				}
 				setCurTick(sc_core::sc_time_stamp().value());
+                pkt->busFirstWordDelay = pkt->busLastWordDelay = 0;
 				if (bus_stalling)
 					retryQueue.push(pkt);
 				else if (!slavePort->sendTimingResp(pkt))

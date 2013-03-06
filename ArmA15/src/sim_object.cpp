@@ -78,25 +78,21 @@ SimObject::init()
 
 void SimObject::loadState(Checkpoint *cp)
 {
-	std::string obj_name=name();
-	std::string name_to_use;
-	//std::cout << "Orig= " << obj_name << std::endl;
-	if ((obj_name.find(".")) != std::string::npos)
-	{
-		obj_name.erase(0,obj_name.find_first_of("."));
-		name_to_use = "system"+ obj_name;
-	}
-	else
-	{
-		name_to_use = "system";
-	}
-	//std::cout << "name_to_use=" << name_to_use << std::endl;
+    std::string obj_name=name();
+    std::string name_to_use;
+    if ((obj_name.find(".")) != std::string::npos)
+    {
+	obj_name.erase(0,obj_name.find_first_of("."));
+        name_to_use = "system"+ obj_name;
+    }
+    else
+    {
+        name_to_use = "system";
+    }
     if (cp->sectionExists(name_to_use)) {
-//    	std::cout << "SUCCESS restoring checkpoint: checkpoint section found for " << name_to_use << std::endl;
         DPRINTF(Checkpoint, "unserializing\n");
         unserialize(cp, name_to_use);
     } else {
-//    	std::cout << "ERROR restoring checkpoint: no checkpoint section found for " << name_to_use << std::endl;
         DPRINTF(Checkpoint, "no checkpoint section found\n");
     }
 }
