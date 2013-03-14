@@ -710,6 +710,10 @@ void CortexA15::before_end_of_elaboration()
   	busParams->width = 64; // bytes //TODO: move to 16!!!
   	busParams->use_default_range = false;
   	busParams->block_size = 64;
+  	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
+		busParams->system=linuxCortexA15;
+	else
+		busParams->system=cortexA15;
   	busParams->port_master_connection_count=6;
 	busParams->port_slave_connection_count=2;
   	busParams->port_default_connection_count=1;
@@ -745,6 +749,10 @@ void CortexA15::before_end_of_elaboration()
 	busParams->width = 64; // bytes
 	busParams->use_default_range = false;
 	busParams->block_size = 64;
+   	if ((_system_cfg == "linux") || (_system_cfg == "linuxRestore") || (_system_cfg == "linuxCAboot"))
+		busParams->system=linuxCortexA15;
+	else
+		busParams->system=cortexA15;
 	busParams->port_master_connection_count=1;
 	busParams->port_slave_connection_count=3*_num_cores;
 	busParams->port_default_connection_count=0;
@@ -1996,6 +2004,7 @@ void CortexA15::before_end_of_elaboration()
 			ArmTableWalkerParams* tableWalkerParams = new ArmTableWalkerParams();
 			tableWalkerParams->name="system.cpu"+ss.str()+".dtb.walker";
 			tableWalkerParams->sys=linuxCortexA15;
+            tableWalkerParams->clock=clk1.value();
 			linux_dtb_walker[i] = tableWalkerParams->create();
 			objects.push_back((SimObject*)linux_dtb_walker[i]);
 
@@ -2009,6 +2018,7 @@ void CortexA15::before_end_of_elaboration()
 			tableWalkerParams = new ArmTableWalkerParams();
 			tableWalkerParams->name="system.cpu"+ss.str()+".itb.walker";
 			tableWalkerParams->sys=linuxCortexA15;
+            tableWalkerParams->clock=clk1.value();
 			linux_itb_walker[i] = tableWalkerParams->create();
 			objects.push_back((SimObject*)linux_itb_walker[i]);
 
@@ -2018,6 +2028,25 @@ void CortexA15::before_end_of_elaboration()
 			tlbParams->walker=linux_itb_walker[i];
 			ArmISA::TLB* itlb_ = tlbParams->create();
 			objects.push_back((SimObject*)itlb_);
+            
+            armISAParams = new ArmISAParams();
+            armISAParams->name=std::string(name())+".cpu"+ss.str()+".isa";
+            armISAParams->fpsid=1090793632;
+            armISAParams->id_isar0=34607377;
+            armISAParams->id_isar1=34677009;
+            armISAParams->id_isar2=555950401;
+            armISAParams->id_isar3=17899825;
+            armISAParams->id_isar4=268501314;
+            armISAParams->id_isar5=0;
+            armISAParams->id_mmfr0=3;
+            armISAParams->id_mmfr1=0;
+            armISAParams->id_mmfr2=19070976;
+            armISAParams->id_mmfr3=4027589137;
+            armISAParams->id_pfr0=49;
+            armISAParams->id_pfr1=1;
+            armISAParams->midr=890224640;
+            ArmISA::ISA* isa_ = armISAParams->create();
+            objects.push_back((SimObject*)isa_);
 
 			atomicSimpleCPUParams = new AtomicSimpleCPUParams();
 			atomicSimpleCPUParams->name="system.cpu"+ss.str();
@@ -2033,6 +2062,7 @@ void CortexA15::before_end_of_elaboration()
 			atomicSimpleCPUParams->function_trace_start=0;
 			atomicSimpleCPUParams->interrupts=interrupts[i];
 			atomicSimpleCPUParams->itb=itlb_;
+            atomicSimpleCPUParams->isa.push_back(isa_);
 			atomicSimpleCPUParams->max_insts_all_threads=0;
 			atomicSimpleCPUParams->max_insts_any_thread=0;
 			atomicSimpleCPUParams->max_loads_all_threads=0;
@@ -2349,7 +2379,7 @@ void CortexA15::start_of_simulation()
 void CortexA15::running_the_kernel()
 {
    wait(SC_ZERO_TIME);
-      if (!((_system_cfg == "linux") || (_system_cfg == "linuxRestore"))){
+      if (!((_system_cfg == "linux") || (_system_cfg == "linuxRestore")  || (_system_cfg == "linuxCAboot"))){
           empty_requests();
       }
 }
