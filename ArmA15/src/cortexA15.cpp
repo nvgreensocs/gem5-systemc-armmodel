@@ -1217,7 +1217,8 @@ void CortexA15::before_end_of_elaboration()
 		pl111Params->amba_id = 1315089,
 		pl111Params->gic = (BaseGic*)gic;
 		pl111Params->vnc = (VncInput*)vncserver;
-		pl111Params->clock = 41667;
+		pl111Params->clock = 1000;
+		pl111Params->pixel_clock = 41667;
 		clcd = pl111Params->create();
 		objects.push_back((SimObject*)clcd);
 	}
